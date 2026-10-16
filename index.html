@@ -9,38 +9,41 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="app">
+
+<div class="auth" id="auth" hidden>
+  <form class="authbox" id="authForm">
+    <h1>Cove</h1>
+    <p id="authSub">Log in to continue</p>
+    <input id="email" type="email" placeholder="Email" required autocomplete="email">
+    <input id="username" placeholder="Username (3-20 characters)" autocomplete="username" hidden>
+    <input id="password" type="password" placeholder="Password (6+ characters)" required minlength="6" autocomplete="current-password">
+    <button class="primary" id="authBtn" type="submit">Log in</button>
+    <div class="msg" id="authMsg" role="alert"></div>
+    <button class="link" id="authSwitch" type="button">Need an account? Sign up</button>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
   <nav class="rail" aria-label="Servers">
-    <button class="srv home on" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg></button>
-    <div class="sep"></div>
-    <button class="srv" style="background:#2f4f46" aria-label="Server Mossy">M</button>
-    <button class="srv" style="background:#46395e" aria-label="Server Night Owls">N</button>
-    <button class="srv" style="background:#5e4a2c" aria-label="Server Study Hall">S</button>
-    <button class="srv add" aria-label="Create a server">+</button>
+    <button class="srv home on" data-act="home" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg></button>
   </nav>
 
   <aside class="side">
-    <button class="find">Find or start a conversation</button>
-    <div class="nav"><button class="navbtn on"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.8.7 3 2.4 3.5 5.2"/></svg>Friends</button></div>
-    <div class="dmhead">Direct messages <button class="ib" style="width:24px;height:24px" aria-label="New message">+</button></div>
+    <button class="find" data-tab="add">Find or start a conversation</button>
+    <div class="nav"><button class="navbtn on" data-act="home"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.8.7 3 2.4 3.5 5.2"/></svg>Friends</button></div>
+    <div class="dmhead">Direct messages</div>
     <div class="dmlist" id="dms"></div>
     <div class="me">
-      <div class="av online" style="background:#5ec8b4">Y</div>
-      <div class="who"><b>You</b><span>Online</span></div>
+      <div class="av online" id="meAv"></div>
+      <div class="who"><b id="meName"></b><span>Online</span></div>
       <button class="ib" id="mic" aria-pressed="false" aria-label="Mute microphone"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
       <button class="ib" id="deaf" aria-pressed="false" aria-label="Deafen"><svg viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></svg></button>
-      <button class="ib" aria-label="Settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg></button>
+      <button class="ib" id="logout" aria-label="Log out" title="Log out"><svg viewBox="0 0 24 24"><path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M16 8l4 4-4 4M20 12H9"/></svg></button>
     </div>
   </aside>
 
   <main class="main">
-    <header class="top" role="tablist">
-      <h1>Friends</h1>
-      <button class="tab on" data-tab="online" role="tab">Online</button>
-      <button class="tab" data-tab="all" role="tab">All</button>
-      <button class="tab" data-tab="pending" role="tab">Pending</button>
-      <button class="tab cta" data-tab="add" role="tab">Add friend</button>
-    </header>
+    <header class="top" id="top" role="tablist"></header>
     <div class="body" id="view"></div>
   </main>
 
@@ -50,80 +53,6 @@
   </aside>
 </div>
 
-<script>
-const APP_NAME = "Cove";
-document.title = APP_NAME;
-
-const colors = ["#7fd1c0","#c4a7f0","#f2b97a","#8fb8f5","#f09aa5","#b5d88a"];
-const friends = [
-  {n:"Mika",   s:"online", t:"Playing guitar",           a:true},
-  {n:"Dario",  s:"online", t:"Studying for finals",      a:true},
-  {n:"Ines",   s:"idle",   t:"Back in 10",               a:false},
-  {n:"Tomas",  s:"dnd",    t:"Do not disturb",           a:false},
-  {n:"Priya",  s:"off",    t:"Offline",                  a:false},
-  {n:"Jonah",  s:"off",    t:"Offline",                  a:false}
-];
-const pending = [{n:"Sasha", t:"Incoming friend request"},{n:"Leo", t:"Outgoing friend request"}];
-const groups = [{n:"Mika, Dario", t:"3 members"},{n:"Weekend crew", t:"5 members"}];
-const color = n => colors[[...n].reduce((a,c)=>a+c.charCodeAt(0),0)%colors.length];
-const av = (n,s="",extra="") => `<div class="av ${s} ${extra}" style="background:${color(n)}">${n[0]}</div>`;
-const chat = `<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-3.9A8 8 0 1 1 20 12z"/></svg>`;
-const dots = `<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>`;
-
-// DM list
-document.getElementById("dms").innerHTML =
-  groups.map(g=>`<button class="dm">${av(g.n,"","group")}<span>${g.n}<small>${g.t}</small></span></button>`).join("") +
-  friends.map(f=>`<button class="dm">${av(f.n,f.s)}<span>${f.n}</span></button>`).join("");
-
-// Active now
-const act = friends.filter(f=>f.a);
-document.getElementById("activeList").innerHTML = act.length
-  ? act.map(f=>`<div class="card">${av(f.n,f.s)}<div><b>${f.n}</b><small>${f.t}</small></div></div>`).join("")
-  : `<p class="empty">Nobody is active right now.</p>`;
-
-// Friends view
-let tab = "online", q = "";
-const view = document.getElementById("view");
-
-function row(f, pend){
-  return `<div class="row">${av(f.n, pend?"":f.s)}<div class="info"><b>${f.n}</b><span class="st">${f.t}</span></div>
-    <button class="ib" aria-label="Message ${f.n}">${chat}</button><button class="ib" aria-label="More options for ${f.n}">${dots}</button></div>`;
-}
-
-function render(){
-  if(tab==="add"){
-    view.innerHTML = `<div class="addbox"><b>Add a friend</b><p>Enter their username to send a friend request.</p>
-      <div style="display:flex"><label class="search" style="flex:1"><input id="uname" placeholder="Username" aria-label="Username"></label>
-      <button class="send" id="send">Send request</button></div><div class="msg" id="msg" role="status"></div></div>`;
-    document.getElementById("send").onclick = () => {
-      const v = document.getElementById("uname").value.trim();
-      document.getElementById("msg").textContent = v ? `Request sent to ${v}.` : "Enter a username first.";
-    };
-    return;
-  }
-  let list = tab==="online" ? friends.filter(f=>f.s!=="off") : tab==="all" ? friends : pending;
-  list = list.filter(f=>f.n.toLowerCase().includes(q));
-  const label = {online:"Online",all:"All friends",pending:"Pending"}[tab];
-  view.innerHTML = `<label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/></svg>
-    <input id="s" placeholder="Search" aria-label="Search friends" value="${q}"></label>
-    <div class="count">${label} — ${list.length}</div>` +
-    (list.length ? list.map(f=>row(f,tab==="pending")).join("") : `<div class="empty">No one here yet.</div>`);
-  const s = document.getElementById("s");
-  s.oninput = e => { q = e.target.value.toLowerCase(); const pos=s.selectionStart; render(); const n=document.getElementById("s"); n.focus(); n.setSelectionRange(pos,pos); };
-}
-
-document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
-  if(b.dataset.tab!=="add") b.classList.add("on"); else b.classList.add("on");
-  tab = b.dataset.tab; q = ""; render();
-});
-
-["mic","deaf"].forEach(id=>{
-  const b = document.getElementById(id);
-  b.onclick = () => b.setAttribute("aria-pressed", b.getAttribute("aria-pressed")==="true" ? "false" : "true");
-});
-
-render();
-</script>
+<script type="module" src="script.js"></script>
 </body>
 </html>
