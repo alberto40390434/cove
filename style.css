@@ -151,3 +151,14 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
   .authbox{padding:22px}
 }
 @media (prefers-reduced-motion:reduce){.rail,.side,.active,.scrim{transition:none}}
+
+/* ---- status menu ---- */
+.me{position:relative}
+.mebtn{display:flex;align-items:center;gap:10px;flex:1;min-width:0;text-align:left;padding:2px 4px;border-radius:8px}
+.mebtn:hover{background:var(--raised)}
+.me .who{display:block;flex:1;min-width:0}
+.statusmenu{position:absolute;left:0;right:0;bottom:calc(100% + 6px);z-index:5;padding:6px;background:var(--raised);border:1px solid var(--line);border-radius:10px}
+.statusmenu button{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border-radius:7px;text-align:left}
+.statusmenu button:hover{background:var(--panel)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--off);flex:none}
+.dot.online{background:var(--online)} .dot.idle{background:var(--idle)} .dot.dnd{background:var(--dnd)}
