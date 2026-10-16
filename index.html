@@ -26,13 +26,25 @@
 <div class="app" id="app" hidden>
   <nav class="rail" aria-label="Servers">
     <button class="srv home on" data-act="home" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg></button>
+    <div class="sep"></div>
+    <div id="servers"></div>
+    <button class="srv add" data-act="newserver" aria-label="Create or join a server">+</button>
   </nav>
 
   <aside class="side">
+    <div class="sidepane" id="homeSide">
     <button class="find" data-tab="add">Find or start a conversation</button>
     <div class="nav"><button class="navbtn on" data-act="home"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.8.7 3 2.4 3.5 5.2"/></svg>Friends</button></div>
     <div class="dmhead">Direct messages</div>
     <div class="dmlist" id="dms"></div>
+    </div>
+    <div class="sidepane" id="srvSide" hidden>
+      <div class="srvhead"><span id="srvName"></span>
+        <span><button class="ib" data-act="invite" aria-label="Show invite code" title="Invite people"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></button>
+        <button class="ib" id="leaveBtn" data-act="leave" aria-label="Leave server" title="Leave server"><svg viewBox="0 0 24 24"><path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M16 8l4 4-4 4M20 12H9"/></svg></button></span></div>
+      <div class="dmhead">Channels <button class="ib" id="addCh" data-act="newchannel" aria-label="Add channel" title="Add channel" style="width:24px;height:24px">+</button></div>
+      <div class="dmlist" id="chList"></div>
+    </div>
     <div class="me">
       <div class="av online" id="meAv"></div>
       <div class="who"><b id="meName"></b><span>Online</span></div>
@@ -48,9 +60,20 @@
   </main>
 
   <aside class="active">
-    <h2>Active now</h2>
+    <h2 id="rightTitle">Active now</h2>
     <div id="activeList"></div>
   </aside>
+</div>
+
+<div class="auth" id="modal" hidden>
+  <div class="authbox">
+    <h1>Add a server</h1>
+    <form id="createForm"><input id="srvNameIn" placeholder="Name your server" maxlength="40" required><button class="primary" type="submit">Create server</button></form>
+    <p>Or join one with an invite code</p>
+    <form id="joinForm"><input id="codeIn" placeholder="Invite code" required autocomplete="off"><button class="primary" type="submit">Join server</button></form>
+    <div class="msg" id="modalMsg" role="alert"></div>
+    <button class="link" type="button" data-act="closemodal">Cancel</button>
+  </div>
 </div>
 
 <script type="module" src="script.js"></script>
