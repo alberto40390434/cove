@@ -115,3 +115,11 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 .m p{white-space:pre-wrap;overflow-wrap:anywhere}
 .send{display:flex;gap:8px;margin-top:12px}
 .send input{flex:1;height:44px;padding:0 14px;font:inherit;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--text)}
+
+/* ---- servers ---- */
+#servers{display:contents}
+.sidepane{flex:1;display:flex;flex-direction:column;min-height:0}
+.srvhead{display:flex;align-items:center;justify-content:space-between;height:52px;padding:0 10px 0 18px;border-bottom:1px solid var(--line);font-weight:700}
+.srvhead>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dm.on{background:var(--raised);color:var(--text)}
+.authbox form{display:flex;flex-direction:column;gap:12px}
