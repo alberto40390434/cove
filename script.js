@@ -90,7 +90,7 @@ onAuthStateChanged(auth, async u => {
   if (!u) { me = null; $("app").hidden = true; $("auth").hidden = false; return; }
   if (!u.emailVerified) {
     me = null; $("app").hidden = true; $("auth").hidden = true; $("verify").hidden = false;
-    $("verifyText").textContent = `We sent a verification link to ${u.email}. Open it, then come back here and press the button below. Check your spam folder too.`;
+    $("verifyText").textContent = `We sent a verification link to ${u.email}. Open it, then come back here and press the button below. It often lands in spam. If it does, open it and click "Not spam".`;
     return;
   }
   await u.getIdToken(true);   // refresh so the security rules see the verified email
@@ -330,6 +330,10 @@ function render() {
 /* ---------- clicks ---------- */
 document.addEventListener("click", e => {
   const t = e.target.closest("[data-act],[data-tab]"); if (!t || !me) return;
+  const appEl = $("app"), a0 = t.dataset.act;
+  if (a0 === "menu") { appEl.classList.toggle("nav-open"); appEl.classList.remove("mem-open"); return; }
+  if (a0 === "members") { appEl.classList.toggle("mem-open"); appEl.classList.remove("nav-open"); return; }
+  if (a0 !== "server") appEl.classList.remove("nav-open", "mem-open");   // keep the menu open after picking a server so you can pick a channel
   if (t.dataset.tab) { closeChat(); closeServer(); tab = t.dataset.tab; q = ""; shellFor = null; return render(); }
   const { act, id } = t.dataset, r = rels.find(x => x.id === id), ref = doc(db, "friendships", id || "x");
   if (act === "home") { closeChat(); closeServer(); shellFor = null; render(); }
