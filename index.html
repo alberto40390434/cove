@@ -55,10 +55,15 @@
   </aside>
 
   <main class="main">
-    <header class="top" id="top" role="tablist"></header>
+    <div class="topwrap">
+      <button class="ib menu" data-act="menu" aria-label="Open menu"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <header class="top" id="top" role="tablist"></header>
+      <button class="ib memb" data-act="members" aria-label="Show people"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.8.7 3 2.4 3.5 5.2"/></svg></button>
+    </div>
     <div class="body" id="view"></div>
   </main>
 
+  <div class="scrim" data-act="closepanels"></div>
   <aside class="active">
     <h2 id="rightTitle">Active now</h2>
     <div id="activeList"></div>
