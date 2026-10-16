@@ -4,17 +4,20 @@ import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWith
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
   onSnapshot, addDoc, serverTimestamp, writeBatch }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getDatabase, ref as dbRef, set, onValue, onDisconnect, serverTimestamp as rtStamp }
+  from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCkpXVTOwjHuzG0msQPhtDuPoRDgR_GxbM",
   authDomain: "cove-b30b4.firebaseapp.com",
+  databaseURL: "https://cove-b30b4-default-rtdb.firebaseio.com",
   projectId: "cove-b30b4",
   storageBucket: "cove-b30b4.firebasestorage.app",
   messagingSenderId: "769872068444",
   appId: "1:769872068444:web:65ab0e799797a8eef6cb99"
 };
 
-const app = initializeApp(firebaseConfig), auth = getAuth(app), db = getFirestore(app);
+const app = initializeApp(firebaseConfig), auth = getAuth(app), db = getFirestore(app), rtdb = getDatabase(app);
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const colors = ["#7fd1c0","#c4a7f0","#f2b97a","#8fb8f5","#f09aa5","#b5d88a"];
@@ -29,13 +32,18 @@ const I = {
 
 /* ---------- state ---------- */
 let me = null, rels = [], profiles = {}, watchers = {}, unsubs = [], timers = [];
+let presence = {}, myStatus = "online", connUnsub = null;
 let tab = "online", q = "", chat = null, chatMsgs = [], chatUnsub = null, shellFor = null;
 let myServers = [], srv = null;
 
 const other = r => r.users.find(u => u !== me.uid);
 const nameOf = r => r.names[other(r)];
 const accepted = () => rels.filter(r => r.status === "accepted");
-const isOnline = uid => { const t = profiles[uid]?.lastSeen?.toMillis?.(); return !!t && Date.now() - t < 120000; };
+const STATES = { online: ["online", "Online"], away: ["idle", "Away"], dnd: ["dnd", "Do not disturb"], offline: ["", "Offline"] };
+const stateOf = uid => (uid === me?.uid ? myStatus : presence[uid]) || "offline";
+const isOnline = uid => stateOf(uid) !== "offline";
+const dotCls = uid => (STATES[stateOf(uid)] || STATES.offline)[0];
+const labelOf = uid => (STATES[stateOf(uid)] || STATES.offline)[1];
 
 /* ---------- auth screen ---------- */
 let signup = false;
@@ -69,7 +77,7 @@ $("authForm").onsubmit = async e => {
       const cred = await createUserWithEmailAndPassword(auth, email, pw);
       const b = writeBatch(db);
       b.set(doc(db, "usernames", key), { uid: cred.user.uid });
-      b.set(doc(db, "users", cred.user.uid), { username: name, usernameLower: key, lastSeen: serverTimestamp() });
+      b.set(doc(db, "users", cred.user.uid), { username: name, usernameLower: key, status: "online" });
       await b.commit();
       sendEmailVerification(cred.user).catch(console.error);
     } else await signInWithEmailAndPassword(auth, email, pw);
@@ -78,10 +86,10 @@ $("authForm").onsubmit = async e => {
 
 /* ---------- session ---------- */
 function stop() {
-  unsubs.forEach(f => f()); Object.values(watchers).forEach(f => f()); chatUnsub?.(); closeServer(); myServers = [];
+  unsubs.forEach(f => f()); Object.values(watchers).forEach(f => f()); chatUnsub?.(); closeServer(); myServers = []; connUnsub?.(); connUnsub = null;
   timers.forEach(clearInterval);
   unsubs = []; watchers = {}; timers = []; chatUnsub = null;
-  rels = []; profiles = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
+  rels = []; profiles = {}; presence = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
 }
 
 onAuthStateChanged(auth, async u => {
@@ -102,12 +110,12 @@ onAuthStateChanged(auth, async u => {
   }
   if (!snap.exists()) { await signOut(auth); return; }
   me = { uid: u.uid, username: snap.data().username };
+  myStatus = STATES[snap.data().status] ? snap.data().status : "online"; renderMe();
   $("auth").hidden = true; $("app").hidden = false;
   $("meName").textContent = me.username;
   $("meAv").textContent = me.username[0].toUpperCase(); $("meAv").style.background = color(me.username);
 
-  const beat = () => updateDoc(doc(db, "users", me.uid), { lastSeen: serverTimestamp() }).catch(() => {});
-  beat(); timers.push(setInterval(beat, 60000), setInterval(render, 30000));
+  startPresence();
 
   unsubs.push(onSnapshot(query(collection(db, "friendships"), where("users", "array-contains", me.uid)), s => {
     rels = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -121,9 +129,35 @@ onAuthStateChanged(auth, async u => {
   render();
 });
 
+/* ---------- presence: online / away / do not disturb / offline ---------- */
+const publish = () => set(dbRef(rtdb, "status/" + me.uid), { state: myStatus, changed: rtStamp() }).catch(console.error);
+
+function startPresence() {
+  const mine = dbRef(rtdb, "status/" + me.uid);
+  connUnsub = onValue(dbRef(rtdb, ".info/connected"), async s => {
+    if (s.val() !== true) return;
+    // the server flips us to offline the moment this tab closes or the connection drops
+    await onDisconnect(mine).set({ state: "offline", changed: rtStamp() }).catch(console.error);
+    publish();
+  });
+}
+
+function renderMe() {
+  $("meAv").className = "av " + STATES[myStatus][0];
+  $("meStatus").textContent = STATES[myStatus][1];
+}
+
+function setStatus(s) {
+  if (!STATES[s]) return;
+  myStatus = s; renderMe(); publish(); render();
+  updateDoc(doc(db, "users", me.uid), { status: s }).catch(console.error);
+}
+
 function watch(uid) {
   if (watchers[uid]) return;
-  watchers[uid] = onSnapshot(doc(db, "users", uid), s => { profiles[uid] = s.data(); render(); });
+  const a = onSnapshot(doc(db, "users", uid), s => { profiles[uid] = s.data(); render(); });
+  const b = onValue(dbRef(rtdb, "status/" + uid), s => { presence[uid] = s.val()?.state || "offline"; render(); });
+  watchers[uid] = () => { a(); b(); };
 }
 
 /* ---------- friends ---------- */
@@ -222,12 +256,12 @@ async function leaveServer() {
 const btn = (act, id, label, icon) => `<button class="ib" data-act="${act}" data-id="${id}" aria-label="${label}" title="${label}">${icon}</button>`;
 
 function rowHtml(r) {
-  const n = nameOf(r), pend = r.status === "pending", inc = pend && r.to === me.uid, on = isOnline(other(r));
-  const sub = pend ? (inc ? "Incoming friend request" : "Outgoing friend request") : (on ? "Online" : "Offline");
+  const n = nameOf(r), pend = r.status === "pending", inc = pend && r.to === me.uid, dot = dotCls(other(r));
+  const sub = pend ? (inc ? "Incoming friend request" : "Outgoing friend request") : labelOf(other(r));
   const btns = !pend ? btn("chat", r.id, "Message", I.chat) + btn("remove", r.id, "Remove friend", I.x)
     : inc ? btn("accept", r.id, "Accept", I.check) + btn("decline", r.id, "Decline", I.x)
     : btn("cancel", r.id, "Cancel request", I.x);
-  return `<div class="row">${av(n, pend ? "nodot" : on ? "online" : "")}<div class="info"><b>${esc(n)}</b><span class="st">${sub}</span></div>${btns}</div>`;
+  return `<div class="row">${av(n, pend ? "nodot" : dot)}<div class="info"><b>${esc(n)}</b><span class="st">${sub}</span></div>${btns}</div>`;
 }
 
 function shell(key, html, bind) {
@@ -276,7 +310,7 @@ function renderServer() {
   $("addCh").hidden = srv.owner !== me.uid; $("leaveBtn").hidden = srv.owner === me.uid;
   $("chList").innerHTML = srv.channels.map(c => `<button class="dm ${c.id === srv.cid ? "on" : ""}" data-act="chan" data-id="${c.id}"><span># ${esc(c.name)}</span></button>`).join("");
   $("rightTitle").textContent = `Members — ${srv.members.length}`;
-  $("activeList").innerHTML = srv.members.map(m => `<div class="card">${av(m.name, isOnline(m.id) ? "online" : "")}<div><b>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : isOnline(m.id) ? "Online" : "Offline"}</small></div></div>`).join("");
+  $("activeList").innerHTML = srv.members.map(m => `<div class="card">${av(m.name, dotCls(m.id))}<div><b>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : labelOf(m.id)}</small></div></div>`).join("");
   const ch = srv.channels.find(c => c.id === srv.cid);
   $("top").innerHTML = `<h1>${ch ? "# " + esc(ch.name) : esc(srv.name)}</h1>`;
   if (!ch) return;
@@ -291,16 +325,16 @@ function render() {
   if (srv) return renderServer();
   $("homeSide").hidden = false; $("srvSide").hidden = true; $("rightTitle").textContent = "Active now";
   const fr = accepted().sort((a, b) => (+isOnline(other(b))) - (+isOnline(other(a))) || nameOf(a).localeCompare(nameOf(b)));
-  $("dms").innerHTML = fr.map(r => `<button class="dm" data-act="chat" data-id="${r.id}">${av(nameOf(r), isOnline(other(r)) ? "online" : "")}<span>${esc(nameOf(r))}</span></button>`).join("")
+  $("dms").innerHTML = fr.map(r => `<button class="dm" data-act="chat" data-id="${r.id}">${av(nameOf(r), dotCls(other(r)))}<span>${esc(nameOf(r))}</span></button>`).join("")
     || `<p class="hint">Add a friend to start a conversation.</p>`;
   const on = fr.filter(r => isOnline(other(r)));
   $("activeList").innerHTML = on.length
-    ? on.map(r => `<div class="card">${av(nameOf(r), "online")}<div><b>${esc(nameOf(r))}</b><small>Online</small></div></div>`).join("")
+    ? on.map(r => `<div class="card">${av(nameOf(r), dotCls(other(r)))}<div><b>${esc(nameOf(r))}</b><small>${labelOf(other(r))}</small></div></div>`).join("")
     : `<p class="hint">Nobody is online right now.</p>`;
 
   const incoming = rels.filter(r => r.status === "pending" && r.to === me.uid).length;
   $("top").innerHTML = chat
-    ? `<h1>${av(chat.name, isOnline(chat.uid) ? "online" : "")}${esc(chat.name)}</h1>`
+    ? `<h1>${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>`
     : `<h1>Friends</h1>` + [["online", "Online"], ["all", "All"], ["pending", "Pending" + (incoming ? ` (${incoming})` : "")]]
         .map(([k, l]) => `<button class="tab ${tab === k ? "on" : ""}" data-tab="${k}" role="tab">${l}</button>`).join("")
       + `<button class="tab cta" data-tab="add" role="tab">Add friend</button>`;
@@ -329,8 +363,12 @@ function render() {
 
 /* ---------- clicks ---------- */
 document.addEventListener("click", e => {
-  const t = e.target.closest("[data-act],[data-tab]"); if (!t || !me) return;
+  const t = e.target.closest("[data-act],[data-tab]");
+  if (!t || !me) { if (!t) $("statusMenu").hidden = true; return; }
   const appEl = $("app"), a0 = t.dataset.act;
+  if (a0 === "statusmenu") { const m = $("statusMenu"); m.hidden = !m.hidden; $("meBtn").setAttribute("aria-expanded", String(!m.hidden)); return; }
+  $("statusMenu").hidden = true;
+  if (a0 === "setstatus") { setStatus(t.dataset.s); return; }
   if (a0 === "menu") { appEl.classList.toggle("nav-open"); appEl.classList.remove("mem-open"); return; }
   if (a0 === "members") { appEl.classList.toggle("mem-open"); appEl.classList.remove("nav-open"); return; }
   if (a0 !== "server") appEl.classList.remove("nav-open", "mem-open");   // keep the menu open after picking a server so you can pick a channel
@@ -371,7 +409,10 @@ $("joinForm").onsubmit = async e => {
 ["mic", "deaf"].forEach(id => $(id).onclick = e => {
   const b = e.currentTarget; b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
 });
-$("logout").onclick = () => signOut(auth);
+$("logout").onclick = async () => {
+  try { await set(dbRef(rtdb, "status/" + me.uid), { state: "offline", changed: rtStamp() }); } catch {}
+  signOut(auth);
+};
 $("verifyOut").onclick = () => signOut(auth);
 $("verifiedBtn").onclick = async () => {
   const u = auth.currentUser; if (!u) return;
