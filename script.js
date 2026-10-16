@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
-import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut }
+import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendEmailVerification }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
   onSnapshot, addDoc, serverTimestamp, writeBatch }
@@ -71,6 +71,7 @@ $("authForm").onsubmit = async e => {
       b.set(doc(db, "usernames", key), { uid: cred.user.uid });
       b.set(doc(db, "users", cred.user.uid), { username: name, usernameLower: key, lastSeen: serverTimestamp() });
       await b.commit();
+      sendEmailVerification(cred.user).catch(console.error);
     } else await signInWithEmailAndPassword(auth, email, pw);
   } catch (err) { msg.textContent = nice(err); }
 };
@@ -85,7 +86,14 @@ function stop() {
 
 onAuthStateChanged(auth, async u => {
   stop();
+  $("verify").hidden = true;
   if (!u) { me = null; $("app").hidden = true; $("auth").hidden = false; return; }
+  if (!u.emailVerified) {
+    me = null; $("app").hidden = true; $("auth").hidden = true; $("verify").hidden = false;
+    $("verifyText").textContent = `We sent a verification link to ${u.email}. Open it, then come back here and press the button below. Check your spam folder too.`;
+    return;
+  }
+  await u.getIdToken(true);   // refresh so the security rules see the verified email
   let snap;
   for (let i = 0; i < 10; i++) {          // sign-up writes the profile just after the account exists
     snap = await getDoc(doc(db, "users", u.uid));
@@ -360,3 +368,17 @@ $("joinForm").onsubmit = async e => {
   const b = e.currentTarget; b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
 });
 $("logout").onclick = () => signOut(auth);
+$("verifyOut").onclick = () => signOut(auth);
+$("verifiedBtn").onclick = async () => {
+  const u = auth.currentUser; if (!u) return;
+  await u.reload();
+  if (u.emailVerified) { await u.getIdToken(true); location.reload(); }
+  else $("verifyMsg").textContent = "Not verified yet. Open the link in the email first.";
+};
+let resendWait = false;
+$("resendBtn").onclick = async () => {
+  if (resendWait || !auth.currentUser) return;
+  resendWait = true; setTimeout(() => resendWait = false, 60000);
+  try { await sendEmailVerification(auth.currentUser); $("verifyMsg").textContent = "Email sent again. It can take a minute."; }
+  catch (err) { $("verifyMsg").textContent = nice(err); }
+};
