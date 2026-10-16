@@ -30,6 +30,7 @@ const I = {
 /* ---------- state ---------- */
 let me = null, rels = [], profiles = {}, watchers = {}, unsubs = [], timers = [];
 let tab = "online", q = "", chat = null, chatMsgs = [], chatUnsub = null, shellFor = null;
+let myServers = [], srv = null;
 
 const other = r => r.users.find(u => u !== me.uid);
 const nameOf = r => r.names[other(r)];
@@ -76,7 +77,7 @@ $("authForm").onsubmit = async e => {
 
 /* ---------- session ---------- */
 function stop() {
-  unsubs.forEach(f => f()); Object.values(watchers).forEach(f => f()); chatUnsub?.();
+  unsubs.forEach(f => f()); Object.values(watchers).forEach(f => f()); chatUnsub?.(); closeServer(); myServers = [];
   timers.forEach(clearInterval);
   unsubs = []; watchers = {}; timers = []; chatUnsub = null;
   rels = []; profiles = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
@@ -105,6 +106,9 @@ onAuthStateChanged(auth, async u => {
     rels.filter(r => r.status === "accepted").forEach(r => watch(other(r)));
     if (chat && !rels.some(r => r.id === chat.id && r.status === "accepted")) closeChat();
     render();
+  }, err => console.error(err)));
+  unsubs.push(onSnapshot(collection(db, "users", me.uid, "servers"), s => {
+    myServers = s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => a.name.localeCompare(b.name)); render();
   }, err => console.error(err)));
   render();
 });
@@ -135,13 +139,76 @@ async function sendRequest(name) {
 
 /* ---------- chat ---------- */
 function openChat(r) {
-  chatUnsub?.();
+  closeServer(); chatUnsub?.();
   chat = { id: r.id, uid: other(r), name: nameOf(r) }; chatMsgs = [];
   chatUnsub = onSnapshot(query(collection(db, "chats", r.id, "messages"), orderBy("createdAt"), limit(200)),
     s => { chatMsgs = s.docs.map(d => d.data()); if (chat) render(); }, err => console.error(err));
   render();
 }
 function closeChat() { chatUnsub?.(); chatUnsub = null; chat = null; chatMsgs = []; }
+
+/* ---------- servers ---------- */
+const randId = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("");
+
+async function createServer(name) {
+  const id = randId();
+  await setDoc(doc(db, "servers", id), { name, owner: me.uid, createdAt: serverTimestamp() });
+  await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, joinedAt: serverTimestamp() });
+  await addDoc(collection(db, "servers", id, "channels"), { name: "general", createdAt: serverTimestamp() });
+  await setDoc(doc(db, "users", me.uid, "servers", id), { name });
+  return id;
+}
+
+async function joinServer(code) {
+  const id = code.trim().toLowerCase();
+  if (!/^[a-z0-9]{10}$/.test(id)) return null;
+  let name;
+  try { const ex = await getDoc(doc(db, "servers", id)); if (ex.exists()) name = ex.data().name; } catch {}   // already a member
+  if (!name) {
+    try { await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, joinedAt: serverTimestamp() }); }
+    catch { return null; }
+    name = (await getDoc(doc(db, "servers", id))).data().name;
+  }
+  await setDoc(doc(db, "users", me.uid, "servers", id), { name });
+  return { id, name };
+}
+
+function closeServer() {
+  if (!srv) return;
+  srv.u.forEach(f => f()); srv.mu?.(); srv = null; shellFor = null;
+  $("srvSide").hidden = true; $("homeSide").hidden = false; $("rightTitle").textContent = "Active now";
+}
+
+function selectChannel(cid) {
+  const s = srv; if (!s) return;
+  s.mu?.(); s.mu = null; s.cid = cid || null; s.msgs = [];
+  if (!cid) return;
+  s.mu = onSnapshot(query(collection(db, "servers", s.id, "channels", cid, "messages"), orderBy("createdAt"), limit(200)),
+    m => { if (srv === s && s.cid === cid) { s.msgs = m.docs.map(x => x.data()); render(); } }, err => console.error(err));
+}
+
+function openServer(id, name) {
+  closeChat(); closeServer();
+  const s = srv = { id, name, owner: null, channels: [], members: [], cid: null, msgs: [], u: [], mu: null };
+  const live = fn => d => { if (srv === s) fn(d); }, bad = err => console.error(err);
+  s.u.push(
+    onSnapshot(doc(db, "servers", id), live(d => { if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner; } render(); }), bad),
+    onSnapshot(query(collection(db, "servers", id, "channels"), orderBy("createdAt")), live(c => {
+      s.channels = c.docs.map(x => ({ id: x.id, ...x.data() }));
+      if (!s.channels.some(x => x.id === s.cid)) selectChannel(s.channels[0]?.id);
+      render();
+    }), bad),
+    onSnapshot(collection(db, "servers", id, "members"), live(m => {
+      s.members = m.docs.map(x => ({ id: x.id, ...x.data() })); s.members.forEach(x => watch(x.id)); render();
+    }), bad));
+  shellFor = null; render();
+}
+
+async function leaveServer() {
+  const id = srv.id; closeServer(); render();
+  try { await deleteDoc(doc(db, "servers", id, "members", me.uid)); } catch (e) { console.error(e); }
+  deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
+}
 
 /* ---------- rendering ---------- */
 const btn = (act, id, label, icon) => `<button class="ib" data-act="${act}" data-id="${id}" aria-label="${label}" title="${label}">${icon}</button>`;
@@ -157,7 +224,7 @@ function rowHtml(r) {
 
 function shell(key, html, bind) {
   if (shellFor === key) return;
-  $("view").innerHTML = html; $("view").classList.toggle("chat", key.startsWith("chat:"));
+  $("view").innerHTML = html; $("view").classList.toggle("chat", key.startsWith("chat:") || key.startsWith("srv:"));
   shellFor = key; bind();
 }
 
@@ -169,18 +236,52 @@ function fillList() {
   $("list").innerHTML = `<div class="count">${label} — ${list.length}</div>` + (list.map(rowHtml).join("") || `<div class="empty">${empty}</div>`);
 }
 
-function fillMsgs() {
+function fillMsgs(list, who, emptyText) {
   const el = $("msgs"), near = !el.children.length || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  el.innerHTML = chatMsgs.length ? chatMsgs.map(m => {
-    const n = m.from === me.uid ? me.username : chat.name;
-    const t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
+  el.innerHTML = list.length ? list.map(m => {
+    const n = who(m), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
     return `<div class="m">${av(n, "nodot")}<div><b>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p></div></div>`;
-  }).join("") : `<div class="empty">This is the start of your chat with ${esc(chat.name)}. Say hi.</div>`;
+  }).join("") : `<div class="empty">${esc(emptyText)}</div>`;
   if (near) el.scrollTop = el.scrollHeight;
+}
+
+const msgPane = ph => `<div id="msgs" aria-live="polite"></div><form class="send" id="sendForm"><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form>`;
+const bindSend = (col, extra = () => ({})) => () => {
+  $("sendForm").onsubmit = async e => {
+    e.preventDefault();
+    const i = $("msgIn"), text = i.value.trim(); if (!text) return;
+    i.value = "";
+    try { await addDoc(col(), { from: me.uid, text, ...extra(), createdAt: serverTimestamp() }); }
+    catch (err) { i.value = text; console.error(err); }
+  };
+  $("msgIn").focus();
+};
+
+function renderRail() {
+  $("servers").innerHTML = myServers.map(x => `<button class="srv ${srv && srv.id === x.id ? "on" : ""}" data-act="server" data-id="${x.id}" data-name="${esc(x.name)}" style="background:${color(x.name)};color:#0b1417" aria-label="${esc(x.name)}" title="${esc(x.name)}">${esc(x.name[0].toUpperCase())}</button>`).join("");
+  document.querySelector(".srv.home").classList.toggle("on", !srv);
+}
+
+function renderServer() {
+  $("homeSide").hidden = true; $("srvSide").hidden = false;
+  $("srvName").textContent = srv.name;
+  $("addCh").hidden = srv.owner !== me.uid; $("leaveBtn").hidden = srv.owner === me.uid;
+  $("chList").innerHTML = srv.channels.map(c => `<button class="dm ${c.id === srv.cid ? "on" : ""}" data-act="chan" data-id="${c.id}"><span># ${esc(c.name)}</span></button>`).join("");
+  $("rightTitle").textContent = `Members — ${srv.members.length}`;
+  $("activeList").innerHTML = srv.members.map(m => `<div class="card">${av(m.name, isOnline(m.id) ? "online" : "")}<div><b>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : isOnline(m.id) ? "Online" : "Offline"}</small></div></div>`).join("");
+  const ch = srv.channels.find(c => c.id === srv.cid);
+  $("top").innerHTML = `<h1>${ch ? "# " + esc(ch.name) : esc(srv.name)}</h1>`;
+  if (!ch) return;
+  shell("srv:" + srv.id + ":" + ch.id, msgPane("Message #" + ch.name),
+    bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username })));
+  fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`);
 }
 
 function render() {
   if (!me) return;
+  renderRail();
+  if (srv) return renderServer();
+  $("homeSide").hidden = false; $("srvSide").hidden = true; $("rightTitle").textContent = "Active now";
   const fr = accepted().sort((a, b) => (+isOnline(other(b))) - (+isOnline(other(a))) || nameOf(a).localeCompare(nameOf(b)));
   $("dms").innerHTML = fr.map(r => `<button class="dm" data-act="chat" data-id="${r.id}">${av(nameOf(r), isOnline(other(r)) ? "online" : "")}<span>${esc(nameOf(r))}</span></button>`).join("")
     || `<p class="hint">Add a friend to start a conversation.</p>`;
@@ -197,19 +298,8 @@ function render() {
       + `<button class="tab cta" data-tab="add" role="tab">Add friend</button>`;
 
   if (chat) {
-    shell("chat:" + chat.id,
-      `<div id="msgs" aria-live="polite"></div><form class="send" id="sendForm"><input id="msgIn" placeholder="Message ${esc(chat.name)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form>`,
-      () => {
-        $("sendForm").onsubmit = async e => {
-          e.preventDefault();
-          const i = $("msgIn"), text = i.value.trim(); if (!text) return;
-          i.value = "";
-          try { await addDoc(collection(db, "chats", chat.id, "messages"), { from: me.uid, text, createdAt: serverTimestamp() }); }
-          catch (err) { i.value = text; console.error(err); }
-        };
-        $("msgIn").focus();
-      });
-    fillMsgs();
+    shell("chat:" + chat.id, msgPane("Message " + chat.name), bindSend(() => collection(db, "chats", chat.id, "messages")));
+    fillMsgs(chatMsgs, m => (m.from === me.uid ? me.username : chat.name), `This is the start of your chat with ${chat.name}. Say hi.`);
   } else if (tab === "add") {
     shell("add",
       `<div class="addbox"><b>Add a friend</b><p>Enter their username to send a friend request.</p><form id="addForm" style="display:flex;gap:8px"><label class="search" style="flex:1"><input id="uname" placeholder="Username" aria-label="Username" autocomplete="off"></label><button class="primary" type="submit">Send request</button></form><div class="msg" id="addMsg" role="status"></div></div>`,
@@ -232,14 +322,39 @@ function render() {
 /* ---------- clicks ---------- */
 document.addEventListener("click", e => {
   const t = e.target.closest("[data-act],[data-tab]"); if (!t || !me) return;
-  if (t.dataset.tab) { closeChat(); tab = t.dataset.tab; q = ""; shellFor = null; return render(); }
+  if (t.dataset.tab) { closeChat(); closeServer(); tab = t.dataset.tab; q = ""; shellFor = null; return render(); }
   const { act, id } = t.dataset, r = rels.find(x => x.id === id), ref = doc(db, "friendships", id || "x");
-  if (act === "home") { closeChat(); shellFor = null; render(); }
+  if (act === "home") { closeChat(); closeServer(); shellFor = null; render(); }
+  else if (act === "server") openServer(id, t.dataset.name);
+  else if (act === "chan") { selectChannel(id); render(); }
+  else if (act === "newserver") { $("modalMsg").textContent = ""; $("modal").hidden = false; $("srvNameIn").focus(); }
+  else if (act === "closemodal") $("modal").hidden = true;
+  else if (act === "invite" && srv) prompt("Invite code. Copy it and send it to your friends:", srv.id);
+  else if (act === "newchannel" && srv) {
+    const n = (prompt("Channel name?") || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
+    if (n) addDoc(collection(db, "servers", srv.id, "channels"), { name: n, createdAt: serverTimestamp() }).catch(console.error);
+  }
+  else if (act === "leave" && srv && confirm(`Leave ${srv.name}?`)) leaveServer();
   else if (act === "chat" && r) openChat(r);
   else if (act === "accept") updateDoc(ref, { status: "accepted" });
   else if (act === "decline" || act === "cancel") deleteDoc(ref);
   else if (act === "remove" && r && confirm(`Remove ${nameOf(r)} from your friends?`)) deleteDoc(ref);
 });
+
+$("createForm").onsubmit = async e => {
+  e.preventDefault();
+  const n = $("srvNameIn").value.trim(); if (!n) return;
+  try { const id = await createServer(n); $("modal").hidden = true; $("srvNameIn").value = ""; openServer(id, n); }
+  catch (err) { $("modalMsg").textContent = "Couldn't create the server. Try again."; console.error(err); }
+};
+$("joinForm").onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const j = await joinServer($("codeIn").value);
+    if (!j) { $("modalMsg").textContent = "That invite code doesn't match a server."; return; }
+    $("modal").hidden = true; $("codeIn").value = ""; openServer(j.id, j.name);
+  } catch (err) { $("modalMsg").textContent = "Couldn't join. Try again."; console.error(err); }
+};
 
 ["mic", "deaf"].forEach(id => $(id).onclick = e => {
   const b = e.currentTarget; b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
