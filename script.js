@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendEmailVerification }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
-  onSnapshot, addDoc, serverTimestamp, writeBatch }
+  onSnapshot, addDoc, serverTimestamp, writeBatch, getDocs }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { getDatabase, ref as dbRef, set, onValue, onDisconnect, serverTimestamp as rtStamp }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
@@ -27,7 +27,9 @@ const I = {
   chat: `<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-3.9A8 8 0 1 1 20 12z"/></svg>`,
   check: `<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`,
   x: `<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
-  search: `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/></svg>`
+  search: `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/></svg>`,
+  vol: `<svg viewBox="0 0 24 24"><path d="M4 10v4h3l5 4V6L7 10zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></svg>`,
+  phone: `<svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A15 15 0 0 1 4 5a1 1 0 0 1 1-1z"/></svg>`
 };
 
 /* ---------- state ---------- */
@@ -86,7 +88,7 @@ $("authForm").onsubmit = async e => {
 
 /* ---------- session ---------- */
 function stop() {
-  unsubs.forEach(f => f()); Object.values(watchers).forEach(f => f()); chatUnsub?.(); closeServer(); myServers = []; connUnsub?.(); connUnsub = null;
+  unsubs.forEach(f => f()); Object.values(watchers).forEach(f => f()); chatUnsub?.(); closeServer(); myServers = []; connUnsub?.(); connUnsub = null; leaveCall();
   timers.forEach(clearInterval);
   unsubs = []; watchers = {}; timers = []; chatUnsub = null;
   rels = []; profiles = {}; presence = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
@@ -115,7 +117,7 @@ onAuthStateChanged(auth, async u => {
   $("meName").textContent = me.username;
   $("meAv").textContent = me.username[0].toUpperCase(); $("meAv").style.background = color(me.username);
 
-  startPresence();
+  startPresence(); warmCalls();
 
   unsubs.push(onSnapshot(query(collection(db, "friendships"), where("users", "array-contains", me.uid)), s => {
     rels = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -183,11 +185,186 @@ async function sendRequest(name) {
 function openChat(r) {
   closeServer(); chatUnsub?.();
   chat = { id: r.id, uid: other(r), name: nameOf(r) }; chatMsgs = [];
-  chatUnsub = onSnapshot(query(collection(db, "chats", r.id, "messages"), orderBy("createdAt"), limit(200)),
+  const u1 = onSnapshot(query(collection(db, "chats", r.id, "messages"), orderBy("createdAt"), limit(200)),
     s => { chatMsgs = s.docs.map(d => d.data()); if (chat) render(); }, err => console.error(err));
+  const u2 = onSnapshot(collection(db, "chats", r.id, "participants"),
+    s => { if (chat?.id === r.id) { chat.parts = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); } }, err => console.error(err));
+  chatUnsub = () => { u1(); u2(); };
   render();
 }
 function closeChat() { chatUnsub?.(); chatUnsub = null; chat = null; chatMsgs = []; }
+
+/* ---------- roles and permissions ---------- */
+const PERMS = [["sendMessages", "Send messages"], ["connectVoice", "Join voice calls"], ["manageChannels", "Manage channels"], ["manageRoles", "Manage roles"], ["kickMembers", "Kick members"]];
+const DEFAULT_PERMS = { sendMessages: true, connectVoice: true, manageChannels: false, manageRoles: false, kickMembers: false };
+const can = p => {
+  if (!srv || !me) return false;
+  if (srv.owner === me.uid) return true;
+  const m = srv.members.find(x => x.id === me.uid), r = srv.roles.find(x => x.id === m?.role);
+  return !!r?.perms?.[p];
+};
+
+/* ---------- calling: LiveKit (HD video, screen share, audio). Firestore only tracks who is in which call. ---------- */
+// Paste the address of your call server here (the Render Web Service made from the calls-server folder):
+const CALL_API = "https://YOUR-CALL-SERVER.onrender.com";
+const LK = window.LivekitClient;
+const CALLS_ON = !CALL_API.includes("YOUR-");   // call buttons stay hidden until the call server address above is filled in
+const roomOf = (...b) => b.join("/");
+const roomName = b => (b[0] === "chats" ? "dm_" + b[1] : `srv_${b[1]}_${b[3]}`);
+const fresh = p => { const t = p.ping?.toMillis?.(); return !t || Date.now() - t < 60000; };
+let call = null, callView = false;
+const tiles = {};
+const warmCalls = () => { if (!CALL_API.includes("YOUR-")) fetch(CALL_API + "/health").catch(() => {}); };   // wakes a sleeping free server
+
+async function joinCall(base, label) {
+  if (CALL_API.includes("YOUR-")) { alert("Calls aren't set up yet: the call server address is missing in script.js."); return; }
+  if (!LK) { alert("The call library didn't load. Refresh the page and try again."); return; }
+  if (call) await leaveCall();
+  const c = call = { base, room: roomOf(...base), label, lk: null, timer: null, audio: [], speaking: new Set() };
+  callView = true; renderCall();
+  try {
+    const r = await fetch(CALL_API + "/token", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room: roomName(base), idToken: await auth.currentUser.getIdToken() })
+    });
+    if (r.status === 403) throw { perm: true };
+    if (!r.ok) throw new Error("token " + r.status);
+    const { token, url } = await r.json();
+    const lk = c.lk = new LK.Room({
+      adaptiveStream: true, dynacast: true,
+      audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      videoCaptureDefaults: { resolution: LK.VideoPresets.h720.resolution },
+      publishDefaults: { simulcast: true, videoEncoding: LK.VideoPresets.h720.encoding, screenShareEncoding: LK.ScreenSharePresets.h1080fps30.encoding }
+    });
+    wireCall(c, lk);
+    await lk.connect(url, token);
+    if (call !== c) { lk.disconnect(); return; }
+    const part = doc(db, ...base, "participants", me.uid);
+    await setDoc(part, { name: me.username, ping: serverTimestamp() });
+    c.timer = setInterval(() => updateDoc(part, { ping: serverTimestamp() }).catch(() => {}), 20000);
+    applyAudio(); renderCall(); render();
+  } catch (err) {
+    console.error(err);
+    if (call === c) {
+      alert(err.perm ? "You don't have permission to join this call."
+        : "Couldn't connect to the call. If nobody has used calls in a while, the call server may be waking up. Wait a minute and try again.");
+      leaveCall();
+    }
+  }
+}
+
+function wireCall(c, lk) {
+  const E = LK.RoomEvent, again = () => { if (call === c) syncStage(); };
+  lk.on(E.TrackSubscribed, (track, _pub, p) => {
+      if (track.kind === LK.Track.Kind.Audio) { const el = track.attach(); $("audioBox").appendChild(el); c.audio.push(el); applyAudio(); }
+      again();
+    })
+    .on(E.TrackUnsubscribed, track => { track.detach().forEach(el => { el.remove(); c.audio = c.audio.filter(x => x !== el); }); again(); })
+    .on(E.ParticipantConnected, again).on(E.ParticipantDisconnected, again)
+    .on(E.TrackMuted, again).on(E.TrackUnmuted, again)
+    .on(E.LocalTrackPublished, again).on(E.LocalTrackUnpublished, again)
+    .on(E.ActiveSpeakersChanged, sp => { c.speaking = new Set(sp.map(p => p.identity)); markSpeaking(); })
+    .on(E.AudioPlaybackStatusChanged, () => { if (!lk.canPlaybackAudio) lk.startAudio().catch(() => {}); })
+    .on(E.Disconnected, () => { if (call === c) leaveCall(); });
+}
+
+async function leaveCall() {
+  const c = call; if (!c) return;
+  call = null; callView = false;
+  clearInterval(c.timer);
+  try { c.lk?.disconnect(); } catch {}
+  c.audio.forEach(el => el.remove());
+  Object.keys(tiles).forEach(k => { tiles[k].el.remove(); delete tiles[k]; });
+  if (me) await deleteDoc(doc(db, ...c.base, "participants", me.uid)).catch(() => {});
+  renderCall(); if (me) render();
+}
+
+function upsertTile(grid, key, p, pub, screen) {
+  let t = tiles[key];
+  if (!t) {
+    const el = document.createElement("div");
+    el.className = "tile" + (screen ? " screen" : "");
+    el.innerHTML = `<video autoplay playsinline muted></video><div class="tav"></div><span class="tname"></span>`;
+    el.onclick = () => el.classList.toggle("big");     // click a tile to enlarge it
+    grid.appendChild(el);
+    t = tiles[key] = { el, vid: el.querySelector("video"), av: el.querySelector(".tav"), nm: el.querySelector(".tname"), cur: null };
+  }
+  const who = p.name || p.identity;
+  t.nm.textContent = who + (screen ? "'s screen" : p.isLocal ? " (you)" : "");
+  t.av.textContent = who[0].toUpperCase(); t.av.style.background = color(who);
+  const track = pub?.track && !pub.isMuted ? pub.track : null;
+  if (track !== t.cur) { if (t.cur) t.cur.detach(t.vid); if (track) track.attach(t.vid); t.cur = track; }
+  t.el.classList.toggle("novideo", !track);
+  t.vid.style.transform = p.isLocal && !screen ? "scaleX(-1)" : "";     // mirror your own camera
+}
+
+function syncStage() {
+  const grid = $("stage"); if (!grid || !call?.lk) return;
+  const lk = call.lk, want = new Set();
+  [lk.localParticipant, ...lk.remoteParticipants.values()].forEach(p => {
+    want.add(p.identity); upsertTile(grid, p.identity, p, p.getTrackPublication(LK.Track.Source.Camera), false);
+    const scr = p.getTrackPublication(LK.Track.Source.ScreenShare);
+    if (scr?.track) { want.add(p.identity + ":s"); upsertTile(grid, p.identity + ":s", p, scr, true); }
+  });
+  Object.keys(tiles).forEach(k => { if (!want.has(k)) { tiles[k].el.remove(); delete tiles[k]; } });
+  grid.dataset.n = Math.min(want.size, 6);
+  markSpeaking(); renderStageControls();
+}
+
+function markSpeaking() {
+  Object.entries(tiles).forEach(([k, t]) => t.el.classList.toggle("speaking", !k.endsWith(":s") && !!call?.speaking?.has(k)));
+}
+
+function renderStageControls() {
+  const lp = call?.lk?.localParticipant; if (!lp) return;
+  const deaf = $("deaf").getAttribute("aria-pressed") === "true", muted = deaf || $("mic").getAttribute("aria-pressed") === "true";
+  $("cMic").classList.toggle("off", muted); $("cDeaf").classList.toggle("off", deaf);
+  $("cCam").classList.toggle("active", lp.isCameraEnabled); $("cScreen").classList.toggle("active", lp.isScreenShareEnabled);
+}
+
+function applyAudio() {
+  if (!call?.lk || call.lk.state !== LK.ConnectionState.Connected) return;
+  const deaf = $("deaf").getAttribute("aria-pressed") === "true", muted = deaf || $("mic").getAttribute("aria-pressed") === "true";
+  call.lk.localParticipant.setMicrophoneEnabled(!muted).then(renderStageControls).catch(() => {});
+  call.audio.forEach(el => el.muted = deaf);
+  renderStageControls();
+}
+
+async function toggleCam() {
+  const lp = call?.lk?.localParticipant; if (!lp) return;
+  try { await lp.setCameraEnabled(!lp.isCameraEnabled); }
+  catch { alert("Couldn't start your camera. Check that this site is allowed to use it."); }
+  syncStage();
+}
+
+async function toggleScreen() {
+  const lp = call?.lk?.localParticipant; if (!lp) return;
+  try {
+    await lp.setScreenShareEnabled(!lp.isScreenShareEnabled,
+      { audio: true, resolution: LK.ScreenSharePresets.h1080fps30.resolution },
+      { screenShareEncoding: LK.ScreenSharePresets.h1080fps30.encoding });
+  } catch { /* closing the picker without choosing lands here */ }
+  syncStage();
+}
+
+function renderCall() {
+  $("callBar").hidden = !call;
+  $("stagePane").hidden = !(call && callView);
+  if (!call) return;
+  const up = call.lk?.state === LK.ConnectionState.Connected;
+  $("callLabel").textContent = call.label; $("stageTitle").textContent = call.label;
+  $("callState").textContent = up ? "Voice connected" : "Connecting...";
+  if (up) syncStage();
+}
+
+function dmCallBtn() {
+  if (!CALLS_ON) return "";
+  const inIt = call?.room === roomOf("chats", chat.id), others = (chat.parts || []).some(p => p.id !== me.uid && fresh(p));
+  return `<button class="callbtn ${inIt ? "on" : ""}" data-act="${inIt ? "leavecall" : "dmcall"}">${I.phone}${inIt ? "Leave call" : others ? "Join call" : "Call"}</button>`;
+}
+
+if (!navigator.mediaDevices?.getDisplayMedia) $("cScreen").hidden = true;      // phones can't share their screen
+addEventListener("pagehide", () => { if (call && me) deleteDoc(doc(db, ...call.base, "participants", me.uid)).catch(() => {}); });
 
 /* ---------- servers ---------- */
 const randId = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("");
@@ -195,8 +372,9 @@ const randId = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b =>
 async function createServer(name) {
   const id = randId();
   await setDoc(doc(db, "servers", id), { name, owner: me.uid, createdAt: serverTimestamp() });
-  await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, joinedAt: serverTimestamp() });
-  await addDoc(collection(db, "servers", id, "channels"), { name: "general", createdAt: serverTimestamp() });
+  await setDoc(doc(db, "servers", id, "roles", "everyone"), { name: "everyone", perms: DEFAULT_PERMS, createdAt: serverTimestamp() });
+  await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, role: "everyone", joinedAt: serverTimestamp() });
+  await addDoc(collection(db, "servers", id, "channels"), { name: "general", type: "text", createdAt: serverTimestamp() });
   await setDoc(doc(db, "users", me.uid, "servers", id), { name });
   return id;
 }
@@ -207,7 +385,7 @@ async function joinServer(code) {
   let name;
   try { const ex = await getDoc(doc(db, "servers", id)); if (ex.exists()) name = ex.data().name; } catch {}   // already a member
   if (!name) {
-    try { await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, joinedAt: serverTimestamp() }); }
+    try { await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, role: "everyone", joinedAt: serverTimestamp() }); }
     catch { return null; }
     name = (await getDoc(doc(db, "servers", id))).data().name;
   }
@@ -217,7 +395,7 @@ async function joinServer(code) {
 
 function closeServer() {
   if (!srv) return;
-  srv.u.forEach(f => f()); srv.mu?.(); srv = null; shellFor = null;
+  srv.u.forEach(f => f()); Object.values(srv.vu).forEach(f => f()); srv.mu?.(); srv = null; shellFor = null;
   $("srvSide").hidden = true; $("homeSide").hidden = false; $("rightTitle").textContent = "Active now";
 }
 
@@ -229,19 +407,48 @@ function selectChannel(cid) {
     m => { if (srv === s && s.cid === cid) { s.msgs = m.docs.map(x => x.data()); render(); } }, err => console.error(err));
 }
 
+// servers made before roles existed: the owner's browser adds the default role and gives members one
+async function migrate(s) {
+  if (srv !== s || s.owner !== me.uid || !s.rl || !s.ml || s.mig) return;
+  const needRole = !s.roles.some(r => r.id === "everyone"), need = s.members.filter(m => !m.role);
+  if (!needRole && !need.length) return;
+  s.mig = true;
+  try {
+    if (needRole) await setDoc(doc(db, "servers", s.id, "roles", "everyone"), { name: "everyone", perms: DEFAULT_PERMS, createdAt: serverTimestamp() });
+    for (const m of need) await updateDoc(doc(db, "servers", s.id, "members", m.id), { role: "everyone" });
+  } catch (e) { console.error(e); }
+}
+
 function openServer(id, name) {
   closeChat(); closeServer();
-  const s = srv = { id, name, owner: null, channels: [], members: [], cid: null, msgs: [], u: [], mu: null };
-  const live = fn => d => { if (srv === s) fn(d); }, bad = err => console.error(err);
+  const s = srv = { id, name, owner: null, channels: [], cats: [], roles: [], members: [], cid: null, msgs: [], u: [], mu: null, vu: {}, vparts: {}, rl: false, ml: false };
+  const live = fn => d => { if (srv === s) fn(d); }, bad = err => console.error(err), col = (...p) => collection(db, "servers", id, ...p);
   s.u.push(
-    onSnapshot(doc(db, "servers", id), live(d => { if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner; } render(); }), bad),
-    onSnapshot(query(collection(db, "servers", id, "channels"), orderBy("createdAt")), live(c => {
+    onSnapshot(doc(db, "servers", id), live(d => {
+      if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner; migrate(s); }
+      render();
+    }), err => {
+      console.error(err);
+      if (err.code === "permission-denied" && srv === s) {
+        closeServer(); render(); deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
+        alert("You're no longer a member of that server.");
+      }
+    }),
+    onSnapshot(query(col("channels"), orderBy("createdAt")), live(c => {
       s.channels = c.docs.map(x => ({ id: x.id, ...x.data() }));
-      if (!s.channels.some(x => x.id === s.cid)) selectChannel(s.channels[0]?.id);
+      if (!s.channels.some(x => x.id === s.cid && x.type !== "voice")) selectChannel(s.channels.find(x => x.type !== "voice")?.id);
+      s.channels.filter(x => x.type === "voice" && !s.vu[x.id]).forEach(x => {
+        s.vu[x.id] = onSnapshot(col("channels", x.id, "participants"), p => {
+          if (srv === s) { s.vparts[x.id] = p.docs.map(d => ({ id: d.id, ...d.data() })); render(); }
+        }, bad);
+      });
       render();
     }), bad),
-    onSnapshot(collection(db, "servers", id, "members"), live(m => {
-      s.members = m.docs.map(x => ({ id: x.id, ...x.data() })); s.members.forEach(x => watch(x.id)); render();
+    onSnapshot(query(col("categories"), orderBy("createdAt")), live(c => { s.cats = c.docs.map(x => ({ id: x.id, ...x.data() })); render(); }), bad),
+    onSnapshot(col("roles"), live(r => { s.roles = r.docs.map(x => ({ id: x.id, ...x.data() })); s.rl = true; migrate(s); render(); refreshSettings(); }), bad),
+    onSnapshot(col("members"), live(m => {
+      s.members = m.docs.map(x => ({ id: x.id, ...x.data() })); s.ml = true;
+      s.members.forEach(x => watch(x.id)); migrate(s); render(); refreshSettings();
     }), bad));
   shellFor = null; render();
 }
@@ -307,16 +514,46 @@ function renderRail() {
 function renderServer() {
   $("homeSide").hidden = true; $("srvSide").hidden = false;
   $("srvName").textContent = srv.name;
-  $("addCh").hidden = srv.owner !== me.uid; $("leaveBtn").hidden = srv.owner === me.uid;
-  $("chList").innerHTML = srv.channels.map(c => `<button class="dm ${c.id === srv.cid ? "on" : ""}" data-act="chan" data-id="${c.id}"><span># ${esc(c.name)}</span></button>`).join("");
+  $("addCh").hidden = !can("manageChannels");
+  $("setBtn").hidden = !(can("manageRoles") || can("kickMembers"));
+  $("leaveBtn").hidden = srv.owner === me.uid;
+  const chBtn = c => {
+    const v = c.type === "voice", liveCall = v && call?.room === roomOf("servers", srv.id, "channels", c.id);
+    return `<button class="dm ${!v && c.id === srv.cid ? "on" : ""} ${liveCall ? "live" : ""}" data-act="chan" data-id="${c.id}" data-type="${v ? "voice" : "text"}"><span>${v ? I.vol : "#"} ${esc(c.name)}</span></button>`
+      + (v ? (srv.vparts[c.id] || []).filter(fresh).map(p => `<div class="vp">${av(p.name, "nodot")}<span>${esc(p.name)}</span></div>`).join("") : "");
+  };
+  const known = k => srv.cats.some(x => x.id === k);
+  $("chList").innerHTML = srv.channels.filter(c => !known(c.categoryId)).map(chBtn).join("")
+    + srv.cats.map(k => `<div class="cat">${esc(k.name)}</div>` + srv.channels.filter(c => c.categoryId === k.id).map(chBtn).join("")).join("");
   $("rightTitle").textContent = `Members — ${srv.members.length}`;
-  $("activeList").innerHTML = srv.members.map(m => `<div class="card">${av(m.name, dotCls(m.id))}<div><b>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : labelOf(m.id)}</small></div></div>`).join("");
+  $("activeList").innerHTML = srv.members.map(m => {
+    const rn = srv.roles.find(r => r.id === m.role)?.name;
+    return `<div class="card">${av(m.name, dotCls(m.id))}<div><b>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : labelOf(m.id)}${rn && rn !== "everyone" && m.id !== srv.owner ? " · " + esc(rn) : ""}</small></div></div>`;
+  }).join("");
   const ch = srv.channels.find(c => c.id === srv.cid);
   $("top").innerHTML = `<h1>${ch ? "# " + esc(ch.name) : esc(srv.name)}</h1>`;
-  if (!ch) return;
+  if (!ch) { shell("srv:none", `<div class="empty">No text channels yet.</div>`, () => {}); return; }
   shell("srv:" + srv.id + ":" + ch.id, msgPane("Message #" + ch.name),
     bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username })));
+  const inp = $("msgIn"), ok = can("sendMessages");
+  if (inp) { inp.disabled = !ok; inp.placeholder = ok ? "Message #" + ch.name : "You don't have permission to send messages."; }
   fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`);
+}
+
+/* ---------- server settings: roles and members ---------- */
+function refreshSettings() {
+  if (!srv || $("setModal").hidden) return;
+  const canRoles = can("manageRoles");
+  $("rolesBox").innerHTML = srv.roles.map(r => `<div class="rolecard"><b>${esc(r.name)}</b><div class="perms">${PERMS.map(([k, l]) =>
+    `<label><input type="checkbox" data-p="${k}" ${r.perms?.[k] ? "checked" : ""} ${canRoles ? "" : "disabled"}>${l}</label>`).join("")}</div>`
+    + (canRoles ? `<button class="primary sm" data-act="saverole" data-id="${r.id}">Save</button>` : "") + `</div>`).join("");
+  $("roleForm").hidden = !canRoles;
+  $("membersBox").innerHTML = srv.members.map(m => {
+    const owner = m.id === srv.owner;
+    return `<div class="mrow"><b>${esc(m.name)}${owner ? " (owner)" : ""}</b>`
+      + (owner ? "" : `<select data-uid="${m.id}" aria-label="Role for ${esc(m.name)}" ${canRoles ? "" : "disabled"}>${srv.roles.map(r => `<option value="${r.id}" ${r.id === m.role ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>`)
+      + (can("kickMembers") && !owner && m.id !== me.uid ? `<button class="danger" data-act="kick" data-id="${m.id}">Kick</button>` : "") + `</div>`;
+  }).join("");
 }
 
 function render() {
@@ -334,7 +571,7 @@ function render() {
 
   const incoming = rels.filter(r => r.status === "pending" && r.to === me.uid).length;
   $("top").innerHTML = chat
-    ? `<h1>${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>`
+    ? `<h1>${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>${dmCallBtn()}`
     : `<h1>Friends</h1>` + [["online", "Online"], ["all", "All"], ["pending", "Pending" + (incoming ? ` (${incoming})` : "")]]
         .map(([k, l]) => `<button class="tab ${tab === k ? "on" : ""}" data-tab="${k}" role="tab">${l}</button>`).join("")
       + `<button class="tab cta" data-tab="add" role="tab">Add friend</button>`;
@@ -364,10 +601,11 @@ function render() {
 /* ---------- clicks ---------- */
 document.addEventListener("click", e => {
   const t = e.target.closest("[data-act],[data-tab]");
-  if (!t || !me) { if (!t) $("statusMenu").hidden = true; return; }
+  if (!t || !me) { if (!t) { $("statusMenu").hidden = true; $("ctxMenu").hidden = true; } return; }
   const appEl = $("app"), a0 = t.dataset.act;
+  if (t.dataset.tab || a0 === "home" || a0 === "chat" || (a0 === "chan" && t.dataset.type !== "voice")) { callView = false; renderCall(); }
   if (a0 === "statusmenu") { const m = $("statusMenu"); m.hidden = !m.hidden; $("meBtn").setAttribute("aria-expanded", String(!m.hidden)); return; }
-  $("statusMenu").hidden = true;
+  $("statusMenu").hidden = true; $("ctxMenu").hidden = true;
   if (a0 === "setstatus") { setStatus(t.dataset.s); return; }
   if (a0 === "menu") { appEl.classList.toggle("nav-open"); appEl.classList.remove("mem-open"); return; }
   if (a0 === "members") { appEl.classList.toggle("mem-open"); appEl.classList.remove("nav-open"); return; }
@@ -376,13 +614,40 @@ document.addEventListener("click", e => {
   const { act, id } = t.dataset, r = rels.find(x => x.id === id), ref = doc(db, "friendships", id || "x");
   if (act === "home") { closeChat(); closeServer(); shellFor = null; render(); }
   else if (act === "server") openServer(id, t.dataset.name);
-  else if (act === "chan") { selectChannel(id); render(); }
+  else if (act === "chan") {
+    if (t.dataset.type === "voice") {
+      const base = ["servers", srv.id, "channels", id], c = srv.channels.find(x => x.id === id);
+      if (call?.room === roomOf(...base)) { callView = true; renderCall(); } else joinCall(base, `${srv.name} / ${c?.name || "voice"}`);
+    }
+    else { selectChannel(id); render(); }
+  }
+  else if (act === "dmcall" && chat) joinCall(["chats", chat.id], "Call with " + chat.name);
+  else if (act === "leavecall") leaveCall();
+  else if (act === "callview" && call) { callView = true; renderCall(); }
+  else if (act === "callhide") { callView = false; renderCall(); }
+  else if (act === "tmic") $("mic").click();
+  else if (act === "tdeaf") $("deaf").click();
+  else if (act === "tcam") toggleCam();
+  else if (act === "tscreen") toggleScreen();
+  else if (act === "settings" && srv) { $("setMsg").textContent = ""; $("setModal").hidden = false; refreshSettings(); }
+  else if (act === "closeset") $("setModal").hidden = true;
+  else if (act === "saverole" && srv) {
+    const perms = {}; PERMS.forEach(([k]) => perms[k] = t.closest(".rolecard").querySelector(`[data-p="${k}"]`).checked);
+    updateDoc(doc(db, "servers", srv.id, "roles", id), { perms }).then(() => $("setMsg").textContent = "Saved.").catch(err => { console.error(err); $("setMsg").textContent = "Couldn't save that."; });
+  }
+  else if (act === "kick" && srv) {
+    const m = srv.members.find(x => x.id === id);
+    if (m && confirm(`Kick ${m.name} from the server?`)) deleteDoc(doc(db, "servers", srv.id, "members", id)).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't kick them."; });
+  }
+  else if (act === "closech") $("chModal").hidden = true;
   else if (act === "newserver") { $("modalMsg").textContent = ""; $("modal").hidden = false; $("srvNameIn").focus(); }
   else if (act === "closemodal") $("modal").hidden = true;
   else if (act === "invite" && srv) prompt("Invite code. Copy it and send it to your friends:", srv.id);
-  else if (act === "newchannel" && srv) {
-    const n = (prompt("Channel name?") || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
-    if (n) addDoc(collection(db, "servers", srv.id, "channels"), { name: n, createdAt: serverTimestamp() }).catch(console.error);
+  else if ((act === "newchannel" || act === "ctxcat") && srv) {
+    $("chMsg").textContent = "";
+    $("chCat").innerHTML = `<option value="">No category</option>` + srv.cats.map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join("");
+    const vo = $("chType").querySelector('option[value="voice"]'); vo.hidden = vo.disabled = !CALLS_ON; $("chType").value = "text";
+    $("chModal").hidden = false; $(act === "ctxcat" ? "catName" : "chName").focus();
   }
   else if (act === "leave" && srv && confirm(`Leave ${srv.name}?`)) leaveServer();
   else if (act === "chat" && r) openChat(r);
@@ -407,9 +672,10 @@ $("joinForm").onsubmit = async e => {
 };
 
 ["mic", "deaf"].forEach(id => $(id).onclick = e => {
-  const b = e.currentTarget; b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
+  const b = e.currentTarget; b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true"); applyAudio();
 });
 $("logout").onclick = async () => {
+  await leaveCall();
   try { await set(dbRef(rtdb, "status/" + me.uid), { state: "offline", changed: rtStamp() }); } catch {}
   signOut(auth);
 };
@@ -427,3 +693,42 @@ $("resendBtn").onclick = async () => {
   try { await sendEmailVerification(auth.currentUser); $("verifyMsg").textContent = "Email sent again. It can take a minute."; }
   catch (err) { $("verifyMsg").textContent = nice(err); }
 };
+
+/* ---------- add channel / category, roles, member roles ---------- */
+const slug = v => v.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
+$("chForm").onsubmit = async e => {
+  e.preventDefault();
+  const name = slug($("chName").value); if (!name || !srv) return;
+  try {
+    await addDoc(collection(db, "servers", srv.id, "channels"), { name, type: $("chType").value, categoryId: $("chCat").value || null, createdAt: serverTimestamp() });
+    $("chName").value = ""; $("chModal").hidden = true;
+  } catch (err) { console.error(err); $("chMsg").textContent = "Couldn't create that. You may not have permission."; }
+};
+$("catForm").onsubmit = async e => {
+  e.preventDefault();
+  const name = $("catName").value.trim(); if (!name || !srv) return;
+  try { await addDoc(collection(db, "servers", srv.id, "categories"), { name, createdAt: serverTimestamp() }); $("catName").value = ""; $("chModal").hidden = true; }
+  catch (err) { console.error(err); $("chMsg").textContent = "Couldn't create that. You may not have permission."; }
+};
+$("roleForm").onsubmit = async e => {
+  e.preventDefault();
+  const name = $("roleName").value.trim(); if (!name || !srv) return;
+  try { await addDoc(collection(db, "servers", srv.id, "roles"), { name, perms: { ...DEFAULT_PERMS }, createdAt: serverTimestamp() }); $("roleName").value = ""; }
+  catch (err) { console.error(err); $("setMsg").textContent = "Couldn't add that role."; }
+};
+$("membersBox").onchange = e => {
+  const sel = e.target.closest("select[data-uid]"); if (!sel || !srv) return;
+  updateDoc(doc(db, "servers", srv.id, "members", sel.dataset.uid), { role: sel.value })
+    .then(() => $("setMsg").textContent = "Role updated.").catch(err => { console.error(err); $("setMsg").textContent = "Couldn't change that role."; refreshSettings(); });
+};
+
+/* ---------- right-click menu in the channel list ---------- */
+$("chList").addEventListener("contextmenu", e => {
+  if (!srv || !can("manageChannels")) return;          // without permission, the browser's normal menu stays
+  e.preventDefault();
+  const m = $("ctxMenu"); m.hidden = false;
+  m.style.left = Math.max(8, Math.min(e.clientX, innerWidth - m.offsetWidth - 8)) + "px";
+  m.style.top = Math.max(8, Math.min(e.clientY, innerHeight - m.offsetHeight - 8)) + "px";
+});
+addEventListener("keydown", e => { if (e.key === "Escape") $("ctxMenu").hidden = true; });
+["scroll", "resize", "blur"].forEach(ev => addEventListener(ev, () => { $("ctxMenu").hidden = true; }, true));
