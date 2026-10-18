@@ -56,6 +56,8 @@
         <span class="who"><b id="meName"></b><span id="meStatus">Online</span></span>
       </button>
       <div class="statusmenu" id="statusMenu" role="menu" hidden>
+        <button role="menuitem" data-act="editprofile">Edit profile</button>
+        <div class="msep"></div>
         <button role="menuitem" data-act="setstatus" data-s="online"><span class="dot online"></span>Online</button>
         <button role="menuitem" data-act="setstatus" data-s="away"><span class="dot idle"></span>Away</button>
         <button role="menuitem" data-act="setstatus" data-s="dnd"><span class="dot dnd"></span>Do not disturb</button>
@@ -118,16 +120,16 @@
 </div>
 
 <div class="auth" id="setModal" hidden>
-  <div class="authbox wide">
-    <h1>Server settings</h1>
-    <h3>Roles</h3>
-    <div id="rolesBox"></div>
-    <form id="roleForm"><input id="roleName" placeholder="New role name" maxlength="30" required autocomplete="off"><button class="primary" type="submit">Add role</button></form>
-    <h3>Members</h3>
-    <div id="membersBox"></div>
+  <div class="authbox wide settings">
+    <div class="sethead"><h1>Server settings</h1><button class="ib" data-act="closeset" aria-label="Close settings"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="settabs"><button class="tab on" data-act="settab" data-id="roles">Roles</button><button class="tab" data-act="settab" data-id="members">Members</button></div>
+    <div id="setBody"></div>
     <div class="msg" id="setMsg" role="status"></div>
-    <button class="link" type="button" data-act="closeset">Close</button>
   </div>
+</div>
+
+<div class="auth" id="profModal" hidden>
+  <div class="authbox prof"><div id="profBody"></div></div>
 </div>
 
 <div class="auth" id="verify" hidden>
