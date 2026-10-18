@@ -41,9 +41,14 @@
     <div class="sidepane" id="srvSide" hidden>
       <div class="srvhead"><span id="srvName"></span>
         <span><button class="ib" data-act="invite" aria-label="Show invite code" title="Invite people"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></button>
+        <button class="ib" id="setBtn" data-act="settings" aria-label="Server settings" title="Roles and members" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg></button>
         <button class="ib" id="leaveBtn" data-act="leave" aria-label="Leave server" title="Leave server"><svg viewBox="0 0 24 24"><path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M16 8l4 4-4 4M20 12H9"/></svg></button></span></div>
       <div class="dmhead">Channels <button class="ib" id="addCh" data-act="newchannel" aria-label="Add channel" title="Add channel" style="width:24px;height:24px">+</button></div>
       <div class="dmlist" id="chList"></div>
+    </div>
+    <div class="callbar" id="callBar" hidden>
+      <div class="callinfo" data-act="callview" role="button" tabindex="0" title="Open call"><b id="callLabel"></b><small id="callState">Connecting...</small></div>
+      <button class="ib" data-act="leavecall" aria-label="Leave call" title="Leave call"><svg viewBox="0 0 24 24"><path d="M4 15c4-4 12-4 16 0l-2 3-3-1.5v-2.5a9 9 0 0 0-6 0v2.5L6 18z"/></svg></button>
     </div>
     <div class="me">
       <button class="mebtn" id="meBtn" data-act="statusmenu" aria-haspopup="true" aria-expanded="false" aria-label="Change your status">
@@ -69,6 +74,17 @@
       <button class="ib memb" data-act="members" aria-label="Show people"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.8.7 3 2.4 3.5 5.2"/></svg></button>
     </div>
     <div class="body" id="view"></div>
+    <div class="stagepane" id="stagePane" hidden>
+      <div class="stagehead"><button class="ib" data-act="callhide" aria-label="Back to chat" title="Back to chat"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button><b id="stageTitle"></b></div>
+      <div class="stage" id="stage"></div>
+      <div class="ctrls">
+        <button class="cbtn" id="cMic" data-act="tmic" aria-label="Mute" title="Mute"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+        <button class="cbtn" id="cCam" data-act="tcam" aria-label="Camera" title="Camera"><svg viewBox="0 0 24 24"><path d="M3 7h11a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3zM15 11l6-3v8l-6-3"/></svg></button>
+        <button class="cbtn" id="cScreen" data-act="tscreen" aria-label="Share screen" title="Share your screen"><svg viewBox="0 0 24 24"><path d="M3 5h18v11H3zM8 20h8M12 16v4"/></svg></button>
+        <button class="cbtn" id="cDeaf" data-act="tdeaf" aria-label="Deafen" title="Deafen"><svg viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></svg></button>
+        <button class="cbtn end" data-act="leavecall" aria-label="Leave call" title="Leave call"><svg viewBox="0 0 24 24"><path d="M4 15c4-4 12-4 16 0l-2 3-3-1.5v-2.5a9 9 0 0 0-6 0v2.5L6 18z"/></svg></button>
+      </div>
+    </div>
   </main>
 
   <div class="scrim" data-act="closepanels"></div>
@@ -76,6 +92,42 @@
     <h2 id="rightTitle">Active now</h2>
     <div id="activeList"></div>
   </aside>
+</div>
+
+<div class="audiobox" id="audioBox"></div>
+
+<div class="ctxmenu" id="ctxMenu" role="menu" hidden>
+  <button role="menuitem" data-act="ctxcat">Create category</button>
+  <button role="menuitem" data-act="newchannel">Create channel</button>
+</div>
+
+<div class="auth" id="chModal" hidden>
+  <div class="authbox">
+    <h1>Add to server</h1>
+    <form id="chForm">
+      <input id="chName" placeholder="Channel name" maxlength="30" required autocomplete="off">
+      <select id="chType" aria-label="Channel type"><option value="text">Text channel</option><option value="voice">Voice channel</option></select>
+      <select id="chCat" aria-label="Category"></select>
+      <button class="primary" type="submit">Create channel</button>
+    </form>
+    <p>Or make a category to group channels</p>
+    <form id="catForm"><input id="catName" placeholder="Category name" maxlength="30" required autocomplete="off"><button class="primary" type="submit">Create category</button></form>
+    <div class="msg" id="chMsg" role="alert"></div>
+    <button class="link" type="button" data-act="closech">Cancel</button>
+  </div>
+</div>
+
+<div class="auth" id="setModal" hidden>
+  <div class="authbox wide">
+    <h1>Server settings</h1>
+    <h3>Roles</h3>
+    <div id="rolesBox"></div>
+    <form id="roleForm"><input id="roleName" placeholder="New role name" maxlength="30" required autocomplete="off"><button class="primary" type="submit">Add role</button></form>
+    <h3>Members</h3>
+    <div id="membersBox"></div>
+    <div class="msg" id="setMsg" role="status"></div>
+    <button class="link" type="button" data-act="closeset">Close</button>
+  </div>
 </div>
 
 <div class="auth" id="verify" hidden>
@@ -100,6 +152,7 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.21.0/dist/livekit-client.umd.min.js"></script>
 <script type="module" src="script.js"></script>
 </body>
 </html>
