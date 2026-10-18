@@ -79,7 +79,7 @@ $("authForm").onsubmit = async e => {
       const cred = await createUserWithEmailAndPassword(auth, email, pw);
       const b = writeBatch(db);
       b.set(doc(db, "usernames", key), { uid: cred.user.uid });
-      b.set(doc(db, "users", cred.user.uid), { username: name, usernameLower: key, status: "online" });
+      b.set(doc(db, "users", cred.user.uid), { username: name, usernameLower: key, status: "online", createdAt: serverTimestamp() });
       await b.commit();
       sendEmailVerification(cred.user).catch(console.error);
     } else await signInWithEmailAndPassword(auth, email, pw);
@@ -113,6 +113,7 @@ onAuthStateChanged(auth, async u => {
   if (!snap.exists()) { await signOut(auth); return; }
   me = { uid: u.uid, username: snap.data().username };
   myStatus = STATES[snap.data().status] ? snap.data().status : "online"; renderMe();
+  if (!snap.data().createdAt) updateDoc(doc(db, "users", u.uid), { createdAt: new Date(u.metadata.creationTime) }).catch(console.error);
   $("auth").hidden = true; $("app").hidden = false;
   $("meName").textContent = me.username;
   $("meAv").textContent = me.username[0].toUpperCase(); $("meAv").style.background = color(me.username);
@@ -200,9 +201,18 @@ const DEFAULT_PERMS = { sendMessages: true, connectVoice: true, manageChannels: 
 const can = p => {
   if (!srv || !me) return false;
   if (srv.owner === me.uid) return true;
-  const m = srv.members.find(x => x.id === me.uid), r = srv.roles.find(x => x.id === m?.role);
-  return !!r?.perms?.[p];
+  const ev = srv.roles.find(r => r.id === "everyone"), m = srv.members.find(x => x.id === me.uid);
+  return !!(ev?.perms?.[p] || m?.perms?.[p]);      // "everyone" permissions plus whatever the member's roles add
 };
+const okHex = c => typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c);
+const SWATCHES = ["#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c", "#3498db", "#9b59b6", "#e91e63", "#95a5a6", "#607d8b", "#ffffff", "#99aab5"];
+// a person's name takes the color of the first role in the list (oldest first) that has one
+const roleColor = m => {
+  if (!m || !srv) return "";
+  const r = srv.roles.find(x => x.id !== "everyone" && (m.roles || []).includes(x.id) && okHex(x.color));
+  return r ? r.color : "";
+};
+const extraPerms = (ids, roles) => Object.fromEntries(PERMS.map(([k]) => [k, ids.some(id => roles.find(r => r.id === id)?.perms?.[k] === true)]));
 
 /* ---------- calling: LiveKit (HD video, screen share, audio). Firestore only tracks who is in which call. ---------- */
 // Paste the address of your call server here (the Render Web Service made from the calls-server folder):
@@ -373,7 +383,7 @@ async function createServer(name) {
   const id = randId();
   await setDoc(doc(db, "servers", id), { name, owner: me.uid, createdAt: serverTimestamp() });
   await setDoc(doc(db, "servers", id, "roles", "everyone"), { name: "everyone", perms: DEFAULT_PERMS, createdAt: serverTimestamp() });
-  await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, role: "everyone", joinedAt: serverTimestamp() });
+  await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, roles: [], perms: {}, joinedAt: serverTimestamp() });
   await addDoc(collection(db, "servers", id, "channels"), { name: "general", type: "text", createdAt: serverTimestamp() });
   await setDoc(doc(db, "users", me.uid, "servers", id), { name });
   return id;
@@ -385,7 +395,7 @@ async function joinServer(code) {
   let name;
   try { const ex = await getDoc(doc(db, "servers", id)); if (ex.exists()) name = ex.data().name; } catch {}   // already a member
   if (!name) {
-    try { await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, role: "everyone", joinedAt: serverTimestamp() }); }
+    try { await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, roles: [], perms: {}, joinedAt: serverTimestamp() }); }
     catch { return null; }
     name = (await getDoc(doc(db, "servers", id))).data().name;
   }
@@ -407,15 +417,15 @@ function selectChannel(cid) {
     m => { if (srv === s && s.cid === cid) { s.msgs = m.docs.map(x => x.data()); render(); } }, err => console.error(err));
 }
 
-// servers made before roles existed: the owner's browser adds the default role and gives members one
+// older servers: the owner's browser adds the default role and gives members the new role fields
 async function migrate(s) {
   if (srv !== s || s.owner !== me.uid || !s.rl || !s.ml || s.mig) return;
-  const needRole = !s.roles.some(r => r.id === "everyone"), need = s.members.filter(m => !m.role);
+  const needRole = !s.roles.some(r => r.id === "everyone"), need = s.members.filter(m => !m.perms || !m.roles);
   if (!needRole && !need.length) return;
   s.mig = true;
   try {
     if (needRole) await setDoc(doc(db, "servers", s.id, "roles", "everyone"), { name: "everyone", perms: DEFAULT_PERMS, createdAt: serverTimestamp() });
-    for (const m of need) await updateDoc(doc(db, "servers", s.id, "members", m.id), { role: "everyone" });
+    for (const m of need) await updateDoc(doc(db, "servers", s.id, "members", m.id), { roles: m.roles || [], perms: m.perms || {} });
   } catch (e) { console.error(e); }
 }
 
@@ -445,7 +455,7 @@ function openServer(id, name) {
       render();
     }), bad),
     onSnapshot(query(col("categories"), orderBy("createdAt")), live(c => { s.cats = c.docs.map(x => ({ id: x.id, ...x.data() })); render(); }), bad),
-    onSnapshot(col("roles"), live(r => { s.roles = r.docs.map(x => ({ id: x.id, ...x.data() })); s.rl = true; migrate(s); render(); refreshSettings(); }), bad),
+    onSnapshot(col("roles"), live(r => { s.roles = r.docs.map(x => ({ id: x.id, ...x.data() })).sort((a, b) => (a.createdAt?.toMillis?.() || 0) - (b.createdAt?.toMillis?.() || 0)); s.rl = true; migrate(s); render(); refreshSettings(); }), bad),
     onSnapshot(col("members"), live(m => {
       s.members = m.docs.map(x => ({ id: x.id, ...x.data() })); s.ml = true;
       s.members.forEach(x => watch(x.id)); migrate(s); render(); refreshSettings();
@@ -468,7 +478,7 @@ function rowHtml(r) {
   const btns = !pend ? btn("chat", r.id, "Message", I.chat) + btn("remove", r.id, "Remove friend", I.x)
     : inc ? btn("accept", r.id, "Accept", I.check) + btn("decline", r.id, "Decline", I.x)
     : btn("cancel", r.id, "Cancel request", I.x);
-  return `<div class="row">${av(n, pend ? "nodot" : dot)}<div class="info"><b>${esc(n)}</b><span class="st">${sub}</span></div>${btns}</div>`;
+  return `<div class="row"><span class="plink" data-act="profile" data-uid="${other(r)}">${av(n, pend ? "nodot" : dot)}</span><div class="info plink" data-act="profile" data-uid="${other(r)}"><b>${esc(n)}</b><span class="st">${sub}</span></div>${btns}</div>`;
 }
 
 function shell(key, html, bind) {
@@ -485,11 +495,11 @@ function fillList() {
   $("list").innerHTML = `<div class="count">${label} — ${list.length}</div>` + (list.map(rowHtml).join("") || `<div class="empty">${empty}</div>`);
 }
 
-function fillMsgs(list, who, emptyText) {
+function fillMsgs(list, who, emptyText, colorOf) {
   const el = $("msgs"), near = !el.children.length || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   el.innerHTML = list.length ? list.map(m => {
-    const n = who(m), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
-    return `<div class="m">${av(n, "nodot")}<div><b>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p></div></div>`;
+    const n = who(m), c = colorOf?.(m), u = esc(m.from || ""), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
+    return `<div class="m"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div><b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p></div></div>`;
   }).join("") : `<div class="empty">${esc(emptyText)}</div>`;
   if (near) el.scrollTop = el.scrollHeight;
 }
@@ -527,8 +537,8 @@ function renderServer() {
     + srv.cats.map(k => `<div class="cat">${esc(k.name)}</div>` + srv.channels.filter(c => c.categoryId === k.id).map(chBtn).join("")).join("");
   $("rightTitle").textContent = `Members — ${srv.members.length}`;
   $("activeList").innerHTML = srv.members.map(m => {
-    const rn = srv.roles.find(r => r.id === m.role)?.name;
-    return `<div class="card">${av(m.name, dotCls(m.id))}<div><b>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : labelOf(m.id)}${rn && rn !== "everyone" && m.id !== srv.owner ? " · " + esc(rn) : ""}</small></div></div>`;
+    const c = roleColor(m);
+    return `<div class="card plink" data-act="profile" data-uid="${m.id}">${av(m.name, dotCls(m.id))}<div><b ${c ? `style="color:${c}"` : ""}>${esc(m.name)}</b><small>${m.id === srv.owner ? "Owner" : labelOf(m.id)}</small></div></div>`;
   }).join("");
   const ch = srv.channels.find(c => c.id === srv.cid);
   $("top").innerHTML = `<h1>${ch ? "# " + esc(ch.name) : esc(srv.name)}</h1>`;
@@ -537,23 +547,118 @@ function renderServer() {
     bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username })));
   const inp = $("msgIn"), ok = can("sendMessages");
   if (inp) { inp.disabled = !ok; inp.placeholder = ok ? "Message #" + ch.name : "You don't have permission to send messages."; }
-  fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`);
+  fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`, m => roleColor(srv.members.find(x => x.id === m.from)));
 }
 
 /* ---------- server settings: roles and members ---------- */
-function refreshSettings() {
+Object.assign(I, {
+  people: `<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/></svg>`,
+  pencil: `<svg viewBox="0 0 24 24"><path d="M4 20l1-4L16.5 4.5a2 2 0 0 1 3 3L8 19zM14 7l3 3"/></svg>`,
+  trash: `<svg viewBox="0 0 24 24"><path d="M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>`
+});
+let setTab = "roles", editRole = null;
+const shield = c => `<svg viewBox="0 0 24 24" style="fill:${okHex(c) ? c : "#99aab5"};stroke:none"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/></svg>`;
+
+function refreshSettings(force) {
   if (!srv || $("setModal").hidden) return;
-  const canRoles = can("manageRoles");
-  $("rolesBox").innerHTML = srv.roles.map(r => `<div class="rolecard"><b>${esc(r.name)}</b><div class="perms">${PERMS.map(([k, l]) =>
-    `<label><input type="checkbox" data-p="${k}" ${r.perms?.[k] ? "checked" : ""} ${canRoles ? "" : "disabled"}>${l}</label>`).join("")}</div>`
-    + (canRoles ? `<button class="primary sm" data-act="saverole" data-id="${r.id}">Save</button>` : "") + `</div>`).join("");
-  $("roleForm").hidden = !canRoles;
-  $("membersBox").innerHTML = srv.members.map(m => {
-    const owner = m.id === srv.owner;
-    return `<div class="mrow"><b>${esc(m.name)}${owner ? " (owner)" : ""}</b>`
-      + (owner ? "" : `<select data-uid="${m.id}" aria-label="Role for ${esc(m.name)}" ${canRoles ? "" : "disabled"}>${srv.roles.map(r => `<option value="${r.id}" ${r.id === m.role ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>`)
-      + (can("kickMembers") && !owner && m.id !== me.uid ? `<button class="danger" data-act="kick" data-id="${m.id}">Kick</button>` : "") + `</div>`;
-  }).join("");
+  if (editRole && !force) return;                      // don't wipe what someone is typing
+  $("setModal").querySelectorAll(".settabs .tab").forEach(b => b.classList.toggle("on", b.dataset.id === setTab));
+  const canRoles = can("manageRoles"), body = $("setBody");
+  if (setTab === "roles" && editRole) {
+    const r = srv.roles.find(x => x.id === editRole);
+    if (!r) { editRole = null; return refreshSettings(true); }
+    const ev = r.id === "everyone", col = okHex(r.color) ? r.color : "#99aab5";
+    body.innerHTML = `<button class="link" data-act="roleback">← Back to roles</button><h3>${ev ? "Permissions everyone gets" : "Edit role"}</h3>`
+      + (ev ? "" : `<label class="fld">Role name<input id="rName" maxlength="30" value="${esc(r.name)}"></label>
+        <div class="fld">Role color<div class="swatches">${SWATCHES.map(c => `<button type="button" class="sw ${c === col ? "on" : ""}" data-act="pickcolor" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join("")}<input type="color" id="rColor" value="${col}" aria-label="Custom color"></div></div>`)
+      + `<div class="perms col">${PERMS.map(([k, l]) => `<label><input type="checkbox" data-p="${k}" ${r.perms?.[k] ? "checked" : ""}>${l}</label>`).join("")}</div>
+        <div class="row-actions"><button class="primary" data-act="saverole" data-id="${r.id}">Save changes</button>${ev ? "" : `<button class="danger" data-act="delrole" data-id="${r.id}">Delete role</button>`}</div>`;
+    return;
+  }
+  if (setTab === "roles") {
+    const count = r => r.id === "everyone" ? srv.members.length : srv.members.filter(m => (m.roles || []).includes(r.id)).length;
+    body.innerHTML = `<div class="rhead"><span>Roles — ${srv.roles.length}</span><span>Members</span></div><div class="rlist">`
+      + srv.roles.map(r => `<div class="rrow"><span class="shield">${shield(r.color)}</span><b>${esc(r.name)}</b><span class="cnt">${count(r)} ${I.people}</span>`
+        + (canRoles ? btn("editrole", r.id, "Edit role", I.pencil) + (r.id === "everyone" ? "" : btn("delrole", r.id, "Delete role", I.trash)) : "") + `</div>`).join("")
+      + `</div>` + (canRoles ? `<button class="primary" data-act="newrole">Create role</button>` : "");
+    return;
+  }
+  body.innerHTML = `<div class="mlist">` + srv.members.map(m => {
+    const owner = m.id === srv.owner, mine = (m.roles || []).map(id => srv.roles.find(r => r.id === id)).filter(Boolean);
+    const free = srv.roles.filter(r => r.id !== "everyone" && !(m.roles || []).includes(r.id)), c = roleColor(m);
+    return `<div class="mrow2"><div class="mtop">${av(m.name, "nodot")}<b ${c ? `style="color:${c}"` : ""}>${esc(m.name)}${owner ? " (owner)" : ""}</b>`
+      + (can("kickMembers") && !owner && m.id !== me.uid ? `<button class="danger" data-act="kick" data-id="${m.id}">Kick</button>` : "") + `</div><div class="chips">`
+      + mine.map(r => `<span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}${canRoles ? `<button data-act="unrole" data-uid="${m.id}" data-id="${r.id}" aria-label="Remove ${esc(r.name)}">×</button>` : ""}</span>`).join("")
+      + (canRoles && free.length ? `<select class="addrole" data-uid="${m.id}" aria-label="Add a role to ${esc(m.name)}"><option value="">+ Add role</option>${free.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select>` : "")
+      + `</div></div>`;
+  }).join("") + `</div>`;
+}
+
+async function syncMembers(list, rolesList, newIds) {       // rewrite roles + extra permissions on many members at once
+  for (let i = 0; i < list.length; i += 400) {
+    const b = writeBatch(db);
+    list.slice(i, i + 400).forEach(m => { const ids = newIds(m); b.update(doc(db, "servers", srv.id, "members", m.id), { roles: ids, perms: extraPerms(ids, rolesList) }); });
+    await b.commit();
+  }
+}
+const setMemberRoles = (uid, ids) => updateDoc(doc(db, "servers", srv.id, "members", uid), { roles: ids, perms: extraPerms(ids, srv.roles) });
+
+async function saveRole(id) {
+  const perms = {}; PERMS.forEach(([k]) => perms[k] = document.querySelector(`#setBody [data-p="${k}"]`).checked);
+  const upd = id === "everyone" ? { perms } : { name: $("rName").value.trim() || "new role", color: $("rColor").value, perms };
+  await updateDoc(doc(db, "servers", srv.id, "roles", id), upd);
+  if (id !== "everyone") await syncMembers(srv.members.filter(m => (m.roles || []).includes(id)), srv.roles.map(r => r.id === id ? { ...r, ...upd } : r), m => m.roles || []);
+}
+
+async function deleteRole(id) {
+  const r = srv.roles.find(x => x.id === id);
+  if (!r || id === "everyone" || !confirm(`Delete the role "${r.name}"? Everyone who has it will lose it.`)) return false;
+  await syncMembers(srv.members.filter(m => (m.roles || []).includes(id)), srv.roles.filter(x => x.id !== id), m => (m.roles || []).filter(x => x !== id));
+  await deleteDoc(doc(db, "servers", srv.id, "roles", id));
+  return true;
+}
+
+/* ---------- profiles ---------- */
+const fmtDate = d => d ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "Unknown";
+
+async function openProfile(uid, edit = false) {
+  if (!uid || !me) return;
+  $("profModal").hidden = false; $("profBody").innerHTML = `<div class="empty">Loading...</div>`;
+  watch(uid);
+  let u = null;
+  try { u = (await getDoc(doc(db, "users", uid))).data(); } catch (e) { console.error(e); }
+  if (!u) { $("profBody").innerHTML = `<div class="empty">Couldn't load this profile.</div><div class="row-actions" style="padding:0 18px 18px"><button class="link" data-act="closeprof">Close</button></div>`; return; }
+  renderProfile(uid, u, edit && uid === me.uid);
+}
+
+function renderProfile(uid, u, editing) {
+  const mine = uid === me.uid, banner = okHex(u.bannerColor) ? u.bannerColor : "#5ec8b4", name = u.username || "Unknown";
+  const made = u.createdAt?.toDate?.() || (mine ? new Date(auth.currentUser.metadata.creationTime) : null);
+  const mem = srv?.members.find(x => x.id === uid);
+  const head = `<div class="pbanner" style="background:${banner}"></div><div class="pbig">${av(name, dotCls(uid))}</div>`;
+  if (editing) {
+    $("profBody").innerHTML = head + `<form id="profForm" class="pform"><h2>Edit profile</h2>
+      <label class="fld">Pronouns<input id="pPron" maxlength="24" value="${esc(u.pronouns || "")}" placeholder="for example: she/her" autocomplete="off"></label>
+      <label class="fld">About me<textarea id="pBio" maxlength="190" rows="4" placeholder="Tell people about yourself">${esc(u.bio || "")}</textarea></label>
+      <div class="fld">Banner color<div class="swatches">${SWATCHES.map(c => `<button type="button" class="sw ${c === banner ? "on" : ""}" data-act="pickbanner" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join("")}<input type="color" id="pColor" value="${banner}" aria-label="Custom color"></div></div>
+      <div class="row-actions"><button class="primary" type="submit">Save</button><button class="link" type="button" data-act="closeprof">Cancel</button></div><div class="msg" id="profMsg" role="status"></div></form>`;
+    $("pColor").oninput = e => { document.querySelector(".pbanner").style.background = e.target.value; };
+    $("profForm").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        await updateDoc(doc(db, "users", me.uid), { pronouns: $("pPron").value.trim(), bio: $("pBio").value.trim(), bannerColor: $("pColor").value });
+        openProfile(me.uid, false);
+      } catch (err) { console.error(err); $("profMsg").textContent = "Couldn't save your profile."; }
+    };
+    return;
+  }
+  const roles = mem ? (mem.roles || []).map(id => srv.roles.find(r => r.id === id)).filter(Boolean) : [];
+  $("profBody").innerHTML = head + `<div class="pinfo"><h2>${esc(name)}</h2>${u.pronouns ? `<div class="pron">${esc(u.pronouns)}</div>` : ""}<div class="pstat">${labelOf(uid)}</div>`
+    + (u.bio ? `<h4>About me</h4><p class="bio">${esc(u.bio)}</p>` : "")
+    + `<h4>Member since</h4><p>${fmtDate(made)}</p>`
+    + (mem?.joinedAt?.toDate ? `<h4>Joined ${esc(srv.name)}</h4><p>${fmtDate(mem.joinedAt.toDate())}</p>` : "")
+    + (roles.length ? `<h4>Roles</h4><div class="chips">${roles.map(r => `<span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span>`).join("")}</div>` : "")
+    + `<div class="row-actions" style="margin-top:12px">${mine ? `<button class="primary" data-act="editprofile">Edit profile</button>` : ""}<button class="link" data-act="closeprof">Close</button></div></div>`;
 }
 
 function render() {
@@ -566,12 +671,12 @@ function render() {
     || `<p class="hint">Add a friend to start a conversation.</p>`;
   const on = fr.filter(r => isOnline(other(r)));
   $("activeList").innerHTML = on.length
-    ? on.map(r => `<div class="card">${av(nameOf(r), dotCls(other(r)))}<div><b>${esc(nameOf(r))}</b><small>${labelOf(other(r))}</small></div></div>`).join("")
+    ? on.map(r => `<div class="card plink" data-act="profile" data-uid="${other(r)}">${av(nameOf(r), dotCls(other(r)))}<div><b>${esc(nameOf(r))}</b><small>${labelOf(other(r))}</small></div></div>`).join("")
     : `<p class="hint">Nobody is online right now.</p>`;
 
   const incoming = rels.filter(r => r.status === "pending" && r.to === me.uid).length;
   $("top").innerHTML = chat
-    ? `<h1>${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>${dmCallBtn()}`
+    ? `<h1 class="plink" data-act="profile" data-uid="${chat.uid}">${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>${dmCallBtn()}`
     : `<h1>Friends</h1>` + [["online", "Online"], ["all", "All"], ["pending", "Pending" + (incoming ? ` (${incoming})` : "")]]
         .map(([k, l]) => `<button class="tab ${tab === k ? "on" : ""}" data-tab="${k}" role="tab">${l}</button>`).join("")
       + `<button class="tab cta" data-tab="add" role="tab">Add friend</button>`;
@@ -607,6 +712,7 @@ document.addEventListener("click", e => {
   if (a0 === "statusmenu") { const m = $("statusMenu"); m.hidden = !m.hidden; $("meBtn").setAttribute("aria-expanded", String(!m.hidden)); return; }
   $("statusMenu").hidden = true; $("ctxMenu").hidden = true;
   if (a0 === "setstatus") { setStatus(t.dataset.s); return; }
+  if (a0 === "editprofile") { openProfile(me.uid, true); return; }
   if (a0 === "menu") { appEl.classList.toggle("nav-open"); appEl.classList.remove("mem-open"); return; }
   if (a0 === "members") { appEl.classList.toggle("mem-open"); appEl.classList.remove("nav-open"); return; }
   if (a0 !== "server") appEl.classList.remove("nav-open", "mem-open");   // keep the menu open after picking a server so you can pick a channel
@@ -629,11 +735,28 @@ document.addEventListener("click", e => {
   else if (act === "tdeaf") $("deaf").click();
   else if (act === "tcam") toggleCam();
   else if (act === "tscreen") toggleScreen();
-  else if (act === "settings" && srv) { $("setMsg").textContent = ""; $("setModal").hidden = false; refreshSettings(); }
+  else if (act === "settings" && srv) { setTab = "roles"; editRole = null; $("setMsg").textContent = ""; $("setModal").hidden = false; refreshSettings(true); }
   else if (act === "closeset") $("setModal").hidden = true;
+  else if (act === "settab") { setTab = id; editRole = null; $("setMsg").textContent = ""; refreshSettings(true); }
+  else if (act === "editrole" && srv) { editRole = id; $("setMsg").textContent = ""; refreshSettings(true); }
+  else if (act === "roleback") { editRole = null; refreshSettings(true); }
+  else if (act === "newrole" && srv) {
+    addDoc(collection(db, "servers", srv.id, "roles"), { name: "new role", color: "#99aab5", perms: Object.fromEntries(PERMS.map(([k]) => [k, false])), createdAt: serverTimestamp() })
+      .then(d => { editRole = d.id; refreshSettings(true); }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't add that role."; });
+  }
+  else if (act === "delrole" && srv) {
+    deleteRole(id).then(ok => { if (ok) { editRole = null; refreshSettings(true); } }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't delete that role."; });
+  }
+  else if (act === "unrole" && srv) {
+    const m = srv.members.find(x => x.id === t.dataset.uid);
+    if (m) setMemberRoles(m.id, (m.roles || []).filter(x => x !== id)).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't change that."; });
+  }
+  else if (act === "pickcolor") { $("rColor").value = t.dataset.color; document.querySelectorAll("#setBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
+  else if (act === "pickbanner") { $("pColor").value = t.dataset.color; document.querySelector(".pbanner").style.background = t.dataset.color; document.querySelectorAll("#profBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
+  else if (act === "profile") openProfile(t.dataset.uid);
+  else if (act === "closeprof") $("profModal").hidden = true;
   else if (act === "saverole" && srv) {
-    const perms = {}; PERMS.forEach(([k]) => perms[k] = t.closest(".rolecard").querySelector(`[data-p="${k}"]`).checked);
-    updateDoc(doc(db, "servers", srv.id, "roles", id), { perms }).then(() => $("setMsg").textContent = "Saved.").catch(err => { console.error(err); $("setMsg").textContent = "Couldn't save that."; });
+    saveRole(id).then(() => { $("setMsg").textContent = "Saved."; }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't save that."; });
   }
   else if (act === "kick" && srv) {
     const m = srv.members.find(x => x.id === id);
@@ -710,17 +833,12 @@ $("catForm").onsubmit = async e => {
   try { await addDoc(collection(db, "servers", srv.id, "categories"), { name, createdAt: serverTimestamp() }); $("catName").value = ""; $("chModal").hidden = true; }
   catch (err) { console.error(err); $("chMsg").textContent = "Couldn't create that. You may not have permission."; }
 };
-$("roleForm").onsubmit = async e => {
-  e.preventDefault();
-  const name = $("roleName").value.trim(); if (!name || !srv) return;
-  try { await addDoc(collection(db, "servers", srv.id, "roles"), { name, perms: { ...DEFAULT_PERMS }, createdAt: serverTimestamp() }); $("roleName").value = ""; }
-  catch (err) { console.error(err); $("setMsg").textContent = "Couldn't add that role."; }
-};
-$("membersBox").onchange = e => {
-  const sel = e.target.closest("select[data-uid]"); if (!sel || !srv) return;
-  updateDoc(doc(db, "servers", srv.id, "members", sel.dataset.uid), { role: sel.value })
-    .then(() => $("setMsg").textContent = "Role updated.").catch(err => { console.error(err); $("setMsg").textContent = "Couldn't change that role."; refreshSettings(); });
-};
+$("setBody").addEventListener("change", e => {
+  const sel = e.target.closest("select.addrole"); if (!sel || !sel.value || !srv) return;
+  const m = srv.members.find(x => x.id === sel.dataset.uid); if (!m) return;
+  setMemberRoles(m.id, [...(m.roles || []), sel.value]).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't give that role."; });
+});
+addEventListener("keydown", e => { if (e.key === "Escape") $("profModal").hidden = true; });
 
 /* ---------- right-click menu in the channel list ---------- */
 $("chList").addEventListener("contextmenu", e => {
