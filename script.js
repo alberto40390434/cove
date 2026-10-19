@@ -196,8 +196,22 @@ function openChat(r) {
 function closeChat() { chatUnsub?.(); chatUnsub = null; chat = null; chatMsgs = []; }
 
 /* ---------- roles and permissions ---------- */
-const PERMS = [["sendMessages", "Send messages"], ["connectVoice", "Join voice calls"], ["manageChannels", "Manage channels"], ["manageRoles", "Manage roles"], ["kickMembers", "Kick members"]];
-const DEFAULT_PERMS = { sendMessages: true, connectVoice: true, manageChannels: false, manageRoles: false, kickMembers: false };
+const PERM_INFO = [
+  ["General", [
+    ["manageChannels", "Manage Channels", "Create, edit, delete, lock, and reorder channels and categories."],
+    ["manageRoles", "Manage Roles", "Create, edit, and delete roles and give them to members. Whoever has this can give themselves any permission."]]],
+  ["Membership", [
+    ["kickMembers", "Kick Members", "Remove other members from the server. They can come back with the invite code."]]],
+  ["Text channels", [
+    ["sendMessages", "Send Messages", "Send messages in channels that aren't locked or private to them."],
+    ["manageMessages", "Manage Messages", "Delete messages sent by other members."]]],
+  ["Voice channels", [
+    ["connectVoice", "Connect", "Join voice channels and calls."]]],
+  ["Advanced", [
+    ["administrator", "Administrator", "Every permission, plus access to private and locked channels. This is a dangerous permission to grant."]]]
+];
+const PERMS = PERM_INFO.flatMap(([, items]) => items.map(([k, l]) => [k, l]));
+const DEFAULT_PERMS = { sendMessages: true, connectVoice: true, manageChannels: false, manageRoles: false, kickMembers: false, manageMessages: false, administrator: false };
 const can = p => {
   if (!srv || !me) return false;
   if (srv.owner === me.uid) return true;
@@ -212,7 +226,10 @@ const roleColor = m => {
   const r = srv.roles.find(x => x.id !== "everyone" && (m.roles || []).includes(x.id) && okHex(x.color));
   return r ? r.color : "";
 };
-const extraPerms = (ids, roles) => Object.fromEntries(PERMS.map(([k]) => [k, ids.some(id => roles.find(r => r.id === id)?.perms?.[k] === true)]));
+const extraPerms = (ids, roles) => {                     // what a person's roles add on top of "everyone"
+  const has = k => ids.some(id => roles.find(r => r.id === id)?.perms?.[k] === true), admin = has("administrator");
+  return Object.fromEntries(PERMS.map(([k]) => [k, admin || has(k)]));       // Administrator = everything
+};
 
 /* ---------- calling: LiveKit (HD video, screen share, audio). Firestore only tracks who is in which call. ---------- */
 // Paste the address of your call server here (the Render Web Service made from the calls-server folder):
@@ -414,7 +431,7 @@ function selectChannel(cid) {
   s.mu?.(); s.mu = null; s.cid = cid || null; s.msgs = [];
   if (!cid) return;
   s.mu = onSnapshot(query(collection(db, "servers", s.id, "channels", cid, "messages"), orderBy("createdAt"), limit(200)),
-    m => { if (srv === s && s.cid === cid) { s.msgs = m.docs.map(x => x.data()); render(); } }, err => console.error(err));
+    m => { if (srv === s && s.cid === cid) { s.msgs = m.docs.map(x => ({ id: x.id, ...x.data() })); render(); } }, err => console.error(err));
 }
 
 // older servers: the owner's browser adds the default role and gives members the new role fields
@@ -495,11 +512,11 @@ function fillList() {
   $("list").innerHTML = `<div class="count">${label} — ${list.length}</div>` + (list.map(rowHtml).join("") || `<div class="empty">${empty}</div>`);
 }
 
-function fillMsgs(list, who, emptyText, colorOf) {
+function fillMsgs(list, who, emptyText, colorOf, delOf) {
   const el = $("msgs"), near = !el.children.length || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   el.innerHTML = list.length ? list.map(m => {
     const n = who(m), c = colorOf?.(m), u = esc(m.from || ""), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
-    return `<div class="m"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div><b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p></div></div>`;
+    return `<div class="m"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div><b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p></div>${delOf?.(m) ? `<button class="ib mdel" data-act="delmsg" data-id="${m.id}" aria-label="Delete message" title="Delete message">${I.trash}</button>` : ""}</div>`;
   }).join("") : `<div class="empty">${esc(emptyText)}</div>`;
   if (near) el.scrollTop = el.scrollHeight;
 }
@@ -530,7 +547,7 @@ function renderServer() {
   const mgr = can("manageChannels"), vis = srv.channels.filter(canSee);
   const chBtn = c => {
     const v = c.type === "voice", liveCall = v && call?.room === roomOf("servers", srv.id, "channels", c.id);
-    return `<div class="chwrap" data-drag="chan" data-id="${c.id}" ${mgr ? 'draggable="true"' : ""}><div class="dm ${!v && c.id === srv.cid ? "on" : ""} ${liveCall ? "live" : ""}" role="button" tabindex="0" data-act="chan" data-id="${c.id}" data-type="${v ? "voice" : "text"}"><span>${v ? I.vol : "#"} ${esc(c.name)} ${c.private ? I.lock : ""}</span></div>`
+    return `<div class="chwrap" data-drag="chan" data-id="${c.id}" ${mgr ? 'draggable="true"' : ""}><div class="dm ${!v && c.id === srv.cid ? "on" : ""} ${liveCall ? "live" : ""}" role="button" tabindex="0" data-act="chan" data-id="${c.id}" data-type="${v ? "voice" : "text"}"><span>${v ? I.vol : "#"} ${esc(c.name)} ${c.private ? I.lock : ""} ${c.locked && !v ? I.readonly : ""}</span></div>`
       + (mgr ? `<button class="ib chgear" data-act="editchan" data-id="${c.id}" aria-label="Edit channel" title="Edit channel">${I.gear}</button>` : "") + `</div>`
       + (v ? (srv.vparts[c.id] || []).filter(fresh).map(p => `<div class="vp">${av(p.name, "nodot")}<span>${esc(p.name)}</span></div>`).join("") : "");
   };
@@ -547,9 +564,9 @@ function renderServer() {
   if (!ch) { shell("srv:none", `<div class="empty">No text channels yet.</div>`, () => {}); return; }
   shell("srv:" + srv.id + ":" + ch.id, msgPane("Message #" + ch.name),
     bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username })));
-  const inp = $("msgIn"), ok = can("sendMessages");
-  if (inp) { inp.disabled = !ok; inp.placeholder = ok ? "Message #" + ch.name : "You don't have permission to send messages."; }
-  fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`, m => roleColor(srv.members.find(x => x.id === m.from)));
+  const inp = $("msgIn"), ok = can("sendMessages") && canSend(ch);
+  if (inp) { inp.disabled = !ok; inp.placeholder = ok ? "Message #" + ch.name : canSend(ch) ? "You don't have permission to send messages." : "This channel is locked. Only staff can send messages here."; }
+  fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`, m => roleColor(srv.members.find(x => x.id === m.from)), m => m.from === me.uid || can("manageMessages"));
 }
 
 /* ---------- server settings: roles and members ---------- */
@@ -558,8 +575,14 @@ Object.assign(I, {
   pencil: `<svg viewBox="0 0 24 24"><path d="M4 20l1-4L16.5 4.5a2 2 0 0 1 3 3L8 19zM14 7l3 3"/></svg>`,
   trash: `<svg viewBox="0 0 24 24"><path d="M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>`
 });
-let setTab = "roles", editRole = null;
+let setTab = "roles", editRole = null, roleDraft = null, editTab = "display";
 const shield = c => `<svg viewBox="0 0 24 24" style="fill:${okHex(c) ? c : "#99aab5"};stroke:none"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/></svg>`;
+
+function startEdit(id) {
+  const r = srv.roles.find(x => x.id === id); if (!r) return;
+  editRole = id; editTab = id === "everyone" ? "perms" : "display";
+  roleDraft = { id, name: r.name, color: okHex(r.color) ? r.color : "#99aab5", perms: { ...Object.fromEntries(PERMS.map(([k]) => [k, false])), ...(r.perms || {}) } };
+}
 
 function refreshSettings(force) {
   if (!srv || $("setModal").hidden) return;
@@ -568,13 +591,28 @@ function refreshSettings(force) {
   const canRoles = can("manageRoles"), body = $("setBody");
   if (setTab === "roles" && editRole) {
     const r = srv.roles.find(x => x.id === editRole);
-    if (!r) { editRole = null; return refreshSettings(true); }
-    const ev = r.id === "everyone", col = okHex(r.color) ? r.color : "#99aab5";
-    body.innerHTML = `<button class="link" data-act="roleback">← Back to roles</button><h3>${ev ? "Permissions everyone gets" : "Edit role"}</h3>`
-      + (ev ? "" : `<label class="fld">Role name<input id="rName" maxlength="30" value="${esc(r.name)}"></label>
-        <div class="fld">Role color<div class="swatches">${SWATCHES.map(c => `<button type="button" class="sw ${c === col ? "on" : ""}" data-act="pickcolor" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join("")}<input type="color" id="rColor" value="${col}" aria-label="Custom color"></div></div>`)
-      + `<div class="perms col">${PERMS.map(([k, l]) => `<label><input type="checkbox" data-p="${k}" ${r.perms?.[k] ? "checked" : ""}>${l}</label>`).join("")}</div>
-        <div class="row-actions"><button class="primary" data-act="saverole" data-id="${r.id}">Save changes</button>${ev ? "" : `<button class="danger" data-act="delrole" data-id="${r.id}">Delete role</button>`}</div>`;
+    if (!r || !roleDraft) { editRole = null; roleDraft = null; return refreshSettings(true); }
+    const ev = r.id === "everyone", d = roleDraft;
+    const holders = srv.members.filter(m => (m.roles || []).includes(r.id)), free = srv.members.filter(m => !(m.roles || []).includes(r.id));
+    const tabs = ev ? [["perms", "Permissions"]] : [["display", "Display"], ["perms", "Permissions"], ["members", `Manage Members (${holders.length})`]];
+    const tab = ev ? "perms" : editTab;
+    let main;
+    if (tab === "display") {
+      main = `<label class="fld">Role name<input data-d="name" maxlength="30" value="${esc(d.name)}"></label>
+        <div class="fld">Role color<div class="swatches">${SWATCHES.map(c => `<button type="button" class="sw ${c === d.color ? "on" : ""}" data-act="pickcolor" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join("")}<input type="color" id="rColor" data-d="color" value="${d.color}" aria-label="Custom color"></div></div>`;
+    } else if (tab === "perms") {
+      main = `<label class="search"><input id="pSearch" placeholder="Search permissions" aria-label="Search permissions" autocomplete="off"></label>` + PERM_INFO.map(([g, items]) => {
+        const rows = items.filter(([k]) => !(ev && k === "administrator")).map(([k, l, desc]) =>
+          `<div class="prow" data-t="${esc((l + " " + desc).toLowerCase())}"><div><b>${l}</b><small>${desc}</small></div><label class="tg"><input type="checkbox" data-p="${k}" ${d.perms[k] ? "checked" : ""} aria-label="${l}"><span></span></label></div>`).join("");
+        return rows ? `<div class="pgroup"><h4>${g}</h4>${rows}</div>` : "";
+      }).join("");
+    } else {
+      main = `<div class="mlist">` + (holders.map(m => `<div class="mrow2"><div class="mtop">${av(m.name, "nodot")}<b>${esc(m.name)}</b><button class="ib" data-act="unrole" data-uid="${m.id}" data-id="${r.id}" aria-label="Remove ${esc(m.name)} from this role" title="Remove from role">${I.x}</button></div></div>`).join("") || `<div class="empty">Nobody has this role yet.</div>`) + `</div>`
+        + (free.length ? `<select class="addmember" data-rid="${r.id}" aria-label="Add a member to this role"><option value="">+ Add member</option>${free.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join("")}</select>` : "");
+    }
+    body.innerHTML = `<button class="link" data-act="roleback">← Back to roles</button><h3>${esc(d.name)}</h3>`
+      + (tabs.length > 1 ? `<div class="settabs">${tabs.map(([k, l]) => `<button class="tab ${k === tab ? "on" : ""}" data-act="roletab" data-id="${k}">${l}</button>`).join("")}</div>` : "")
+      + main + `<div class="row-actions"><button class="primary" data-act="saverole">Save changes</button>${ev ? "" : `<button class="danger" data-act="delrole" data-id="${r.id}">Delete role</button>`}</div>`;
     return;
   }
   if (setTab === "roles") {
@@ -605,11 +643,13 @@ async function syncMembers(list, rolesList, newIds) {       // rewrite roles + e
 }
 const setMemberRoles = (uid, ids) => updateDoc(doc(db, "servers", srv.id, "members", uid), { roles: ids, perms: extraPerms(ids, srv.roles) });
 
-async function saveRole(id) {
-  const perms = {}; PERMS.forEach(([k]) => perms[k] = document.querySelector(`#setBody [data-p="${k}"]`).checked);
-  const upd = id === "everyone" ? { perms } : { name: $("rName").value.trim() || "new role", color: $("rColor").value, perms };
+async function saveRole() {
+  const d = roleDraft; if (!d) return;
+  const id = d.id, ev = id === "everyone", perms = { ...d.perms };
+  if (ev) perms.administrator = false;                  // "everyone" can never be Administrator
+  const upd = ev ? { perms } : { name: d.name.trim() || "new role", color: okHex(d.color) ? d.color : "#99aab5", perms };
   await updateDoc(doc(db, "servers", srv.id, "roles", id), upd);
-  if (id !== "everyone") await syncMembers(srv.members.filter(m => (m.roles || []).includes(id)), srv.roles.map(r => r.id === id ? { ...r, ...upd } : r), m => m.roles || []);
+  if (!ev) await syncMembers(srv.members.filter(m => (m.roles || []).includes(id)), srv.roles.map(r => r.id === id ? { ...r, ...upd } : r), m => m.roles || []);
 }
 
 async function deleteRole(id) {
@@ -668,6 +708,7 @@ Object.assign(I, {
   lock: `<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`,
   gear: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg>`
 });
+I.readonly = `<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-3.9A8 8 0 0 1 20 12z"/><path d="M5 5l14 14"/></svg>`;
 const pos = x => (typeof x.position === "number" ? x.position : x.createdAt?.toMillis?.() || 0);
 const sorted = a => [...a].sort((x, y) => pos(x) - pos(y));
 const knownCat = id => !!id && srv.cats.some(k => k.id === id);
@@ -676,6 +717,12 @@ const canSee = c => {
   if (!c.private || srv.owner === me.uid) return true;
   const m = srv.members.find(x => x.id === me.uid);
   return !!(m?.perms?.manageChannels || (c.allowedRoles || []).some(r => (m?.roles || []).includes(r)));
+};
+// locked channel: everyone reads, only the owner, people who manage channels (administrators included), and chosen roles type
+const canSend = c => {
+  if (!c.locked || srv.owner === me.uid) return true;
+  const m = srv.members.find(x => x.id === me.uid);
+  return !!(m?.perms?.manageChannels || (c.lockRoles || []).some(r => (m?.roles || []).includes(r)));
 };
 function ensureChannel(s) {
   if (srv !== s) return;
@@ -739,15 +786,20 @@ function openEdit(kind, id) {
     $("edBody").innerHTML = `<div class="pform"><h2>Edit category</h2><label class="fld">Category name<input id="edName" maxlength="30" value="${esc(k.name)}" autocomplete="off"></label>${actions("category")}</div>`;
   } else {
     const c = srv.channels.find(x => x.id === id); if (!c) return;
-    const roles = srv.roles.filter(r => r.id !== "everyone"), allowed = c.allowedRoles || [];
-    $("edBody").innerHTML = `<div class="pform"><h2>Edit ${c.type === "voice" ? "voice " : ""}channel</h2>
+    const roles = srv.roles.filter(r => r.id !== "everyone"), voice = c.type === "voice";
+    const checks = (attr, sel) => roles.length
+      ? roles.map(r => `<label><input type="checkbox" ${attr}="${r.id}" ${sel.includes(r.id) ? "checked" : ""}><span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span></label>`).join("")
+      : `<small>Make a role first in Server settings, then come back here.</small>`;
+    $("edBody").innerHTML = `<div class="pform"><h2>Edit ${voice ? "voice " : ""}channel</h2>
       <label class="fld">Channel name<input id="edName" maxlength="30" value="${esc(c.name)}" autocomplete="off"></label>
       <label class="fld">Category<select id="edCat"><option value="">No category</option>${sorted(srv.cats).map(k => `<option value="${k.id}" ${k.id === c.categoryId ? "selected" : ""}>${esc(k.name)}</option>`).join("")}</select></label>
       <label class="chk"><input type="checkbox" id="edPrivate" ${c.private ? "checked" : ""}><span><b>Private channel</b><small>Only the roles you pick can see and use it. The owner and people who manage channels always can.</small></span></label>
-      <div id="edRoles" class="perms col" ${c.private ? "" : "hidden"}>${roles.length
-        ? roles.map(r => `<label><input type="checkbox" data-r="${r.id}" ${allowed.includes(r.id) ? "checked" : ""}><span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span></label>`).join("")
-        : `<small>Make a role first in Server settings, then come back here.</small>`}</div>${actions("channel")}</div>`;
+      <div id="edRoles" class="perms col" ${c.private ? "" : "hidden"}>${checks("data-r", c.allowedRoles || [])}</div>
+      ${voice ? "" : `<label class="chk"><input type="checkbox" id="edLocked" ${c.locked ? "checked" : ""}><span><b>Lock channel (view only)</b><small>Everyone who can see it can read it, but only the owner, administrators, people who manage channels, and the roles you pick can type.</small></span></label>
+      <div id="edLockRoles" class="perms col" ${c.locked ? "" : "hidden"}>${checks("data-l", c.lockRoles || [])}</div>`}
+      ${actions("channel")}</div>`;
     $("edPrivate").onchange = e => { $("edRoles").hidden = !e.target.checked; };
+    if (!voice) $("edLocked").onchange = e => { $("edLockRoles").hidden = !e.target.checked; };
   }
   edit = { kind, id }; $("edModal").hidden = false;
 }
@@ -762,6 +814,7 @@ async function saveEdit() {
       const c = srv.channels.find(x => x.id === edit.id), cat = $("edCat").value || null, priv = $("edPrivate").checked;
       const upd = { name: slug($("edName").value) || c.name, categoryId: cat, private: priv,
         allowedRoles: priv ? [...document.querySelectorAll("#edRoles [data-r]")].filter(b => b.checked).map(b => b.dataset.r) : [] };
+      if (c.type !== "voice") { const lk = $("edLocked").checked; upd.locked = lk; upd.lockRoles = lk ? [...document.querySelectorAll("#edLockRoles [data-l]")].filter(b => b.checked).map(b => b.dataset.l) : []; }
       if ((c.categoryId || null) !== cat) upd.position = Date.now();               // moved to another category: goes to the end of it
       await updateDoc(chRef(edit.id), upd);
     }
@@ -843,23 +896,24 @@ document.addEventListener("click", e => {
   else if (act === "tdeaf") $("deaf").click();
   else if (act === "tcam") toggleCam();
   else if (act === "tscreen") toggleScreen();
-  else if (act === "settings" && srv) { setTab = "roles"; editRole = null; $("setMsg").textContent = ""; $("setModal").hidden = false; refreshSettings(true); }
+  else if (act === "settings" && srv) { setTab = "roles"; editRole = null; roleDraft = null; $("setMsg").textContent = ""; $("setModal").hidden = false; refreshSettings(true); }
   else if (act === "closeset") $("setModal").hidden = true;
-  else if (act === "settab") { setTab = id; editRole = null; $("setMsg").textContent = ""; refreshSettings(true); }
-  else if (act === "editrole" && srv) { editRole = id; $("setMsg").textContent = ""; refreshSettings(true); }
-  else if (act === "roleback") { editRole = null; refreshSettings(true); }
+  else if (act === "settab") { setTab = id; editRole = null; roleDraft = null; $("setMsg").textContent = ""; refreshSettings(true); }
+  else if (act === "editrole" && srv) { startEdit(id); $("setMsg").textContent = ""; refreshSettings(true); }
+  else if (act === "roleback") { editRole = null; roleDraft = null; refreshSettings(true); }
+  else if (act === "roletab") { editTab = id; refreshSettings(true); }
   else if (act === "newrole" && srv) {
     addDoc(collection(db, "servers", srv.id, "roles"), { name: "new role", color: "#99aab5", perms: Object.fromEntries(PERMS.map(([k]) => [k, false])), createdAt: serverTimestamp() })
-      .then(d => { editRole = d.id; refreshSettings(true); }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't add that role."; });
+      .then(d => { startEdit(d.id); refreshSettings(true); }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't add that role."; });
   }
   else if (act === "delrole" && srv) {
-    deleteRole(id).then(ok => { if (ok) { editRole = null; refreshSettings(true); } }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't delete that role."; });
+    deleteRole(id).then(ok => { if (ok) { editRole = null; roleDraft = null; refreshSettings(true); } }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't delete that role."; });
   }
   else if (act === "unrole" && srv) {
     const m = srv.members.find(x => x.id === t.dataset.uid);
-    if (m) setMemberRoles(m.id, (m.roles || []).filter(x => x !== id)).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't change that."; });
+    if (m) setMemberRoles(m.id, (m.roles || []).filter(x => x !== id)).then(() => { if (editRole) refreshSettings(true); }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't change that."; });
   }
-  else if (act === "pickcolor") { $("rColor").value = t.dataset.color; document.querySelectorAll("#setBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
+  else if (act === "pickcolor") { if (roleDraft) roleDraft.color = t.dataset.color; $("rColor").value = t.dataset.color; document.querySelectorAll("#setBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
   else if (act === "pickbanner") { $("pColor").value = t.dataset.color; document.querySelector(".pbanner").style.background = t.dataset.color; document.querySelectorAll("#profBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
   else if (act === "profile") openProfile(t.dataset.uid);
   else if (act === "closeprof") $("profModal").hidden = true;
@@ -875,8 +929,15 @@ document.addEventListener("click", e => {
       .catch(err => { console.error(err); $("edMsg").textContent = "Couldn't delete that."; });
   }
   else if (act === "closeedit") { $("edModal").hidden = true; edit = null; }
+  else if (act === "delmsg" && srv && srv.cid) {
+    if (confirm("Delete this message?")) deleteDoc(doc(db, "servers", srv.id, "channels", srv.cid, "messages", id)).catch(err => { console.error(err); alert("Couldn't delete that message."); });
+  }
+  else if (act === "lockchan" && srv) {
+    const c = srv.channels.find(x => x.id === id);
+    if (c) updateDoc(chRef(id), { locked: !c.locked }).catch(err => { console.error(err); alert("Couldn't change that channel."); });
+  }
   else if (act === "saverole" && srv) {
-    saveRole(id).then(() => { $("setMsg").textContent = "Saved."; }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't save that."; });
+    saveRole().then(() => { $("setMsg").textContent = "Saved."; }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't save that."; });
   }
   else if (act === "kick" && srv) {
     const m = srv.members.find(x => x.id === id);
@@ -954,9 +1015,28 @@ $("catForm").onsubmit = async e => {
   catch (err) { console.error(err); $("chMsg").textContent = "Couldn't create that. You may not have permission."; }
 };
 $("setBody").addEventListener("change", e => {
-  const sel = e.target.closest("select.addrole"); if (!sel || !sel.value || !srv) return;
-  const m = srv.members.find(x => x.id === sel.dataset.uid); if (!m) return;
-  setMemberRoles(m.id, [...(m.roles || []), sel.value]).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't give that role."; });
+  if (!srv) return;
+  const a = e.target.closest("select.addrole"), b = e.target.closest("select.addmember");
+  if (a && a.value) {
+    const m = srv.members.find(x => x.id === a.dataset.uid);
+    if (m) setMemberRoles(m.id, [...(m.roles || []), a.value]).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't give that role."; });
+  }
+  if (b && b.value) {
+    const m = srv.members.find(x => x.id === b.value);
+    if (m) setMemberRoles(m.id, [...(m.roles || []), b.dataset.rid]).then(() => refreshSettings(true)).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't give that role."; });
+  }
+});
+$("setBody").addEventListener("input", e => {         // keeps the role being edited safe while you switch tabs
+  const el = e.target;
+  if (el.id === "pSearch") {
+    const q = el.value.trim().toLowerCase();
+    document.querySelectorAll("#setBody .prow").forEach(r => { r.hidden = !r.dataset.t.includes(q); });
+    document.querySelectorAll("#setBody .pgroup").forEach(g => { g.hidden = !g.querySelector(".prow:not([hidden])"); });
+    return;
+  }
+  if (!roleDraft) return;
+  if (el.dataset.d) roleDraft[el.dataset.d] = el.value;
+  else if (el.dataset.p) roleDraft.perms[el.dataset.p] = el.checked;
 });
 addEventListener("keydown", e => { if (e.key === "Escape") $("profModal").hidden = true; });
 
@@ -965,7 +1045,12 @@ $("chList").addEventListener("contextmenu", e => {
   if (!srv || !can("manageChannels")) return;          // without permission, the browser's normal menu stays
   e.preventDefault();
   const t = e.target.closest("[data-drag]"), items = [];
-  if (t?.dataset.drag === "chan") items.push(["editchan", "Edit channel", t.dataset.id], ["delchan", "Delete channel", t.dataset.id]);
+  if (t?.dataset.drag === "chan") {
+    const c = srv.channels.find(x => x.id === t.dataset.id);
+    items.push(["editchan", "Edit channel", t.dataset.id]);
+    if (c && c.type !== "voice") items.push(["lockchan", c.locked ? "Unlock channel" : "Lock channel", t.dataset.id]);
+    items.push(["delchan", "Delete channel", t.dataset.id]);
+  }
   if (t?.dataset.drag === "cat") items.push(["editcat", "Edit category", t.dataset.id], ["delcat", "Delete category", t.dataset.id]);
   items.push(["ctxcat", "Create category", ""], ["newchannel", "Create channel", ""]);
   const m = $("ctxMenu");
