@@ -14,7 +14,7 @@
   <form class="authbox" id="authForm">
     <h1>Cove</h1>
     <p id="authSub">Log in to continue</p>
-    <input id="email" type="email" placeholder="Email (NO SCHOOL EMAILS)" required autocomplete="email">
+    <input id="email" type="email" placeholder="Email" required autocomplete="email">
     <input id="username" placeholder="Username (3-20 characters)" autocomplete="username" hidden>
     <input id="password" type="password" placeholder="Password (6+ characters)" required minlength="6" autocomplete="current-password">
     <button class="primary" id="authBtn" type="submit">Log in</button>
@@ -97,6 +97,9 @@
 </div>
 
 <div class="audiobox" id="audioBox"></div>
+
+<div class="ctxmenu" id="msgMenu" role="menu" hidden></div>
+<div class="picker" id="picker" role="dialog" aria-label="Pick an emoji" hidden></div>
 
 <div class="ctxmenu" id="ctxMenu" role="menu" hidden>
   <button role="menuitem" data-act="ctxcat">Create category</button>
