@@ -444,9 +444,9 @@ function openServer(id, name) {
         alert("You're no longer a member of that server.");
       }
     }),
-    onSnapshot(query(col("channels"), orderBy("createdAt")), live(c => {
+    onSnapshot(col("channels"), live(c => {
       s.channels = c.docs.map(x => ({ id: x.id, ...x.data() }));
-      if (!s.channels.some(x => x.id === s.cid && x.type !== "voice")) selectChannel(s.channels.find(x => x.type !== "voice")?.id);
+      ensureChannel(s);
       s.channels.filter(x => x.type === "voice" && !s.vu[x.id]).forEach(x => {
         s.vu[x.id] = onSnapshot(col("channels", x.id, "participants"), p => {
           if (srv === s) { s.vparts[x.id] = p.docs.map(d => ({ id: d.id, ...d.data() })); render(); }
@@ -454,10 +454,10 @@ function openServer(id, name) {
       });
       render();
     }), bad),
-    onSnapshot(query(col("categories"), orderBy("createdAt")), live(c => { s.cats = c.docs.map(x => ({ id: x.id, ...x.data() })); render(); }), bad),
+    onSnapshot(col("categories"), live(c => { s.cats = c.docs.map(x => ({ id: x.id, ...x.data() })); render(); }), bad),
     onSnapshot(col("roles"), live(r => { s.roles = r.docs.map(x => ({ id: x.id, ...x.data() })).sort((a, b) => (a.createdAt?.toMillis?.() || 0) - (b.createdAt?.toMillis?.() || 0)); s.rl = true; migrate(s); render(); refreshSettings(); }), bad),
     onSnapshot(col("members"), live(m => {
-      s.members = m.docs.map(x => ({ id: x.id, ...x.data() })); s.ml = true;
+      s.members = m.docs.map(x => ({ id: x.id, ...x.data() })); s.ml = true; ensureChannel(s);
       s.members.forEach(x => watch(x.id)); migrate(s); render(); refreshSettings();
     }), bad));
   shellFor = null; render();
@@ -527,14 +527,16 @@ function renderServer() {
   $("addCh").hidden = !can("manageChannels");
   $("setBtn").hidden = !(can("manageRoles") || can("kickMembers"));
   $("leaveBtn").hidden = srv.owner === me.uid;
+  const mgr = can("manageChannels"), vis = srv.channels.filter(canSee);
   const chBtn = c => {
     const v = c.type === "voice", liveCall = v && call?.room === roomOf("servers", srv.id, "channels", c.id);
-    return `<button class="dm ${!v && c.id === srv.cid ? "on" : ""} ${liveCall ? "live" : ""}" data-act="chan" data-id="${c.id}" data-type="${v ? "voice" : "text"}"><span>${v ? I.vol : "#"} ${esc(c.name)}</span></button>`
+    return `<div class="chwrap" data-drag="chan" data-id="${c.id}" ${mgr ? 'draggable="true"' : ""}><div class="dm ${!v && c.id === srv.cid ? "on" : ""} ${liveCall ? "live" : ""}" role="button" tabindex="0" data-act="chan" data-id="${c.id}" data-type="${v ? "voice" : "text"}"><span>${v ? I.vol : "#"} ${esc(c.name)} ${c.private ? I.lock : ""}</span></div>`
+      + (mgr ? `<button class="ib chgear" data-act="editchan" data-id="${c.id}" aria-label="Edit channel" title="Edit channel">${I.gear}</button>` : "") + `</div>`
       + (v ? (srv.vparts[c.id] || []).filter(fresh).map(p => `<div class="vp">${av(p.name, "nodot")}<span>${esc(p.name)}</span></div>`).join("") : "");
   };
-  const known = k => srv.cats.some(x => x.id === k);
-  $("chList").innerHTML = srv.channels.filter(c => !known(c.categoryId)).map(chBtn).join("")
-    + srv.cats.map(k => `<div class="cat">${esc(k.name)}</div>` + srv.channels.filter(c => c.categoryId === k.id).map(chBtn).join("")).join("");
+  const catHead = k => `<div class="cat" data-drag="cat" data-id="${k.id}" ${mgr ? 'draggable="true"' : ""}><span>${esc(k.name)}</span>${mgr ? `<button class="ib chgear" data-act="editcat" data-id="${k.id}" aria-label="Edit category" title="Edit category">${I.gear}</button>` : ""}</div>`;
+  $("chList").innerHTML = sorted(vis.filter(c => !knownCat(c.categoryId))).map(chBtn).join("")
+    + sorted(srv.cats).map(k => { const list = sorted(vis.filter(c => c.categoryId === k.id)); return list.length || mgr ? catHead(k) + list.map(chBtn).join("") : ""; }).join("");
   $("rightTitle").textContent = `Members — ${srv.members.length}`;
   $("activeList").innerHTML = srv.members.map(m => {
     const c = roleColor(m);
@@ -595,9 +597,9 @@ function refreshSettings(force) {
 }
 
 async function syncMembers(list, rolesList, newIds) {       // rewrite roles + extra permissions on many members at once
-  for (let i = 0; i < list.length; i += 400) {
+  for (let i = 0; i < list.length; i += 5) {
     const b = writeBatch(db);
-    list.slice(i, i + 400).forEach(m => { const ids = newIds(m); b.update(doc(db, "servers", srv.id, "members", m.id), { roles: ids, perms: extraPerms(ids, rolesList) }); });
+    list.slice(i, i + 5).forEach(m => { const ids = newIds(m); b.update(doc(db, "servers", srv.id, "members", m.id), { roles: ids, perms: extraPerms(ids, rolesList) }); });
     await b.commit();
   }
 }
@@ -659,6 +661,112 @@ function renderProfile(uid, u, editing) {
     + (mem?.joinedAt?.toDate ? `<h4>Joined ${esc(srv.name)}</h4><p>${fmtDate(mem.joinedAt.toDate())}</p>` : "")
     + (roles.length ? `<h4>Roles</h4><div class="chips">${roles.map(r => `<span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span>`).join("")}</div>` : "")
     + `<div class="row-actions" style="margin-top:12px">${mine ? `<button class="primary" data-act="editprofile">Edit profile</button>` : ""}<button class="link" data-act="closeprof">Close</button></div></div>`;
+}
+
+/* ---------- channel order, privacy, editing ---------- */
+Object.assign(I, {
+  lock: `<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`,
+  gear: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg>`
+});
+const pos = x => (typeof x.position === "number" ? x.position : x.createdAt?.toMillis?.() || 0);
+const sorted = a => [...a].sort((x, y) => pos(x) - pos(y));
+const knownCat = id => !!id && srv.cats.some(k => k.id === id);
+// private channels: the owner, people who manage channels, and the chosen roles. The database rules enforce the same thing.
+const canSee = c => {
+  if (!c.private || srv.owner === me.uid) return true;
+  const m = srv.members.find(x => x.id === me.uid);
+  return !!(m?.perms?.manageChannels || (c.allowedRoles || []).some(r => (m?.roles || []).includes(r)));
+};
+function ensureChannel(s) {
+  if (srv !== s) return;
+  const ok = sorted(s.channels.filter(x => x.type !== "voice" && canSee(x)));
+  if (!ok.some(x => x.id === s.cid)) selectChannel(ok[0]?.id);
+}
+const chRef = id => doc(db, "servers", srv.id, "channels", id), catRef = id => doc(db, "servers", srv.id, "categories", id);
+async function commitWrites(writes) {                 // small batches stay inside Firestore's rule-lookup limit
+  for (let i = 0; i < writes.length; i += 5) {
+    const b = writeBatch(db); writes.slice(i, i + 5).forEach(([ref, data]) => b.update(ref, data)); await b.commit();
+  }
+}
+function chLists() {
+  const L = { "": sorted(srv.channels.filter(c => !knownCat(c.categoryId))) };
+  srv.cats.forEach(k => { L[k.id] = sorted(srv.channels.filter(c => c.categoryId === k.id)); });
+  return L;
+}
+async function moveChannel(id, info) {
+  const ch = srv.channels.find(c => c.id === id); if (!ch || info.id === id) return;
+  const L = chLists(), from = knownCat(ch.categoryId) ? ch.categoryId : "", rest = k => L[k].filter(c => c.id !== id);
+  let to, idx;
+  if (info.zone === "end") { to = ""; idx = rest("").length; }
+  else if (info.kind === "cat") { to = info.id; idx = 0; }                      // dropped on a category name: top of that category
+  else {
+    const tc = srv.channels.find(c => c.id === info.id); if (!tc) return;
+    to = knownCat(tc.categoryId) ? tc.categoryId : "";
+    idx = rest(to).findIndex(c => c.id === info.id) + (info.after ? 1 : 0);
+  }
+  const target = rest(to); target.splice(idx, 0, ch);
+  const writes = [], put = (list, key) => list.forEach((c, i) => { if (c.position !== i || (c.categoryId || "") !== key) writes.push([chRef(c.id), { categoryId: key || null, position: i }]); });
+  put(target, to); if (from !== to) put(rest(from), from);
+  await commitWrites(writes);
+}
+async function moveCategory(id, info) {
+  const k = srv.cats.find(x => x.id === id); if (!k || info.id === id) return;
+  const cats = sorted(srv.cats).filter(x => x.id !== id);
+  let idx = cats.length;
+  if (info.kind === "cat") idx = cats.findIndex(x => x.id === info.id) + (info.after ? 1 : 0);
+  else if (info.zone !== "end") return;
+  cats.splice(idx, 0, k);
+  await commitWrites(cats.flatMap((c, i) => (c.position !== i ? [[catRef(c.id), { position: i }]] : [])));
+}
+async function deleteChannel(id) {
+  const c = srv.channels.find(x => x.id === id);
+  if (!c || !confirm(`Delete #${c.name}? Its messages can't be recovered.`)) return false;
+  await deleteDoc(chRef(id)); return true;
+}
+async function deleteCategory(id) {
+  const k = srv.cats.find(x => x.id === id);
+  if (!k || !confirm(`Delete the category "${k.name}"? Its channels stay, outside any category.`)) return false;
+  await commitWrites(srv.channels.filter(c => c.categoryId === id).map(c => [chRef(c.id), { categoryId: null }]));
+  await deleteDoc(catRef(id)); return true;
+}
+
+let edit = null;
+function openEdit(kind, id) {
+  if (!srv) return;
+  const actions = word => `<div class="row-actions"><button class="primary" data-act="saveedit">Save</button><button class="danger" data-act="deledit">Delete ${word}</button><button class="link" data-act="closeedit">Cancel</button></div><div class="msg" id="edMsg" role="status"></div>`;
+  if (kind === "cat") {
+    const k = srv.cats.find(x => x.id === id); if (!k) return;
+    $("edBody").innerHTML = `<div class="pform"><h2>Edit category</h2><label class="fld">Category name<input id="edName" maxlength="30" value="${esc(k.name)}" autocomplete="off"></label>${actions("category")}</div>`;
+  } else {
+    const c = srv.channels.find(x => x.id === id); if (!c) return;
+    const roles = srv.roles.filter(r => r.id !== "everyone"), allowed = c.allowedRoles || [];
+    $("edBody").innerHTML = `<div class="pform"><h2>Edit ${c.type === "voice" ? "voice " : ""}channel</h2>
+      <label class="fld">Channel name<input id="edName" maxlength="30" value="${esc(c.name)}" autocomplete="off"></label>
+      <label class="fld">Category<select id="edCat"><option value="">No category</option>${sorted(srv.cats).map(k => `<option value="${k.id}" ${k.id === c.categoryId ? "selected" : ""}>${esc(k.name)}</option>`).join("")}</select></label>
+      <label class="chk"><input type="checkbox" id="edPrivate" ${c.private ? "checked" : ""}><span><b>Private channel</b><small>Only the roles you pick can see and use it. The owner and people who manage channels always can.</small></span></label>
+      <div id="edRoles" class="perms col" ${c.private ? "" : "hidden"}>${roles.length
+        ? roles.map(r => `<label><input type="checkbox" data-r="${r.id}" ${allowed.includes(r.id) ? "checked" : ""}><span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span></label>`).join("")
+        : `<small>Make a role first in Server settings, then come back here.</small>`}</div>${actions("channel")}</div>`;
+    $("edPrivate").onchange = e => { $("edRoles").hidden = !e.target.checked; };
+  }
+  edit = { kind, id }; $("edModal").hidden = false;
+}
+async function saveEdit() {
+  if (!edit || !srv) return;
+  const say = t => { $("edMsg").textContent = t; };
+  try {
+    if (edit.kind === "cat") {
+      const name = $("edName").value.trim(); if (!name) return say("Give it a name.");
+      await updateDoc(catRef(edit.id), { name });
+    } else {
+      const c = srv.channels.find(x => x.id === edit.id), cat = $("edCat").value || null, priv = $("edPrivate").checked;
+      const upd = { name: slug($("edName").value) || c.name, categoryId: cat, private: priv,
+        allowedRoles: priv ? [...document.querySelectorAll("#edRoles [data-r]")].filter(b => b.checked).map(b => b.dataset.r) : [] };
+      if ((c.categoryId || null) !== cat) upd.position = Date.now();               // moved to another category: goes to the end of it
+      await updateDoc(chRef(edit.id), upd);
+    }
+    $("edModal").hidden = true; edit = null;
+  } catch (err) { console.error(err); say("Couldn't save that. You may not have permission."); }
 }
 
 function render() {
@@ -755,6 +863,18 @@ document.addEventListener("click", e => {
   else if (act === "pickbanner") { $("pColor").value = t.dataset.color; document.querySelector(".pbanner").style.background = t.dataset.color; document.querySelectorAll("#profBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
   else if (act === "profile") openProfile(t.dataset.uid);
   else if (act === "closeprof") $("profModal").hidden = true;
+  else if (act === "editchan" && srv) openEdit("chan", id);
+  else if (act === "editcat" && srv) openEdit("cat", id);
+  else if (act === "delchan" && srv) deleteChannel(id).catch(err => { console.error(err); alert("Couldn't delete that channel."); });
+  else if (act === "delcat" && srv) deleteCategory(id).catch(err => { console.error(err); alert("Couldn't delete that category."); });
+  else if (act === "saveedit") saveEdit();
+  else if (act === "deledit" && edit) {
+    const e0 = edit;
+    (e0.kind === "cat" ? deleteCategory(e0.id) : deleteChannel(e0.id))
+      .then(ok => { if (ok) { $("edModal").hidden = true; edit = null; } })
+      .catch(err => { console.error(err); $("edMsg").textContent = "Couldn't delete that."; });
+  }
+  else if (act === "closeedit") { $("edModal").hidden = true; edit = null; }
   else if (act === "saverole" && srv) {
     saveRole(id).then(() => { $("setMsg").textContent = "Saved."; }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't save that."; });
   }
@@ -768,7 +888,7 @@ document.addEventListener("click", e => {
   else if (act === "invite" && srv) prompt("Invite code. Copy it and send it to your friends:", srv.id);
   else if ((act === "newchannel" || act === "ctxcat") && srv) {
     $("chMsg").textContent = "";
-    $("chCat").innerHTML = `<option value="">No category</option>` + srv.cats.map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join("");
+    $("chCat").innerHTML = `<option value="">No category</option>` + sorted(srv.cats).map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join("");
     const vo = $("chType").querySelector('option[value="voice"]'); vo.hidden = vo.disabled = !CALLS_ON; $("chType").value = "text";
     $("chModal").hidden = false; $(act === "ctxcat" ? "catName" : "chName").focus();
   }
@@ -823,14 +943,14 @@ $("chForm").onsubmit = async e => {
   e.preventDefault();
   const name = slug($("chName").value); if (!name || !srv) return;
   try {
-    await addDoc(collection(db, "servers", srv.id, "channels"), { name, type: $("chType").value, categoryId: $("chCat").value || null, createdAt: serverTimestamp() });
+    await addDoc(collection(db, "servers", srv.id, "channels"), { name, type: $("chType").value, categoryId: $("chCat").value || null, createdAt: serverTimestamp(), position: Date.now() });
     $("chName").value = ""; $("chModal").hidden = true;
   } catch (err) { console.error(err); $("chMsg").textContent = "Couldn't create that. You may not have permission."; }
 };
 $("catForm").onsubmit = async e => {
   e.preventDefault();
   const name = $("catName").value.trim(); if (!name || !srv) return;
-  try { await addDoc(collection(db, "servers", srv.id, "categories"), { name, createdAt: serverTimestamp() }); $("catName").value = ""; $("chModal").hidden = true; }
+  try { await addDoc(collection(db, "servers", srv.id, "categories"), { name, createdAt: serverTimestamp(), position: Date.now() }); $("catName").value = ""; $("chModal").hidden = true; }
   catch (err) { console.error(err); $("chMsg").textContent = "Couldn't create that. You may not have permission."; }
 };
 $("setBody").addEventListener("change", e => {
@@ -844,9 +964,49 @@ addEventListener("keydown", e => { if (e.key === "Escape") $("profModal").hidden
 $("chList").addEventListener("contextmenu", e => {
   if (!srv || !can("manageChannels")) return;          // without permission, the browser's normal menu stays
   e.preventDefault();
-  const m = $("ctxMenu"); m.hidden = false;
+  const t = e.target.closest("[data-drag]"), items = [];
+  if (t?.dataset.drag === "chan") items.push(["editchan", "Edit channel", t.dataset.id], ["delchan", "Delete channel", t.dataset.id]);
+  if (t?.dataset.drag === "cat") items.push(["editcat", "Edit category", t.dataset.id], ["delcat", "Delete category", t.dataset.id]);
+  items.push(["ctxcat", "Create category", ""], ["newchannel", "Create channel", ""]);
+  const m = $("ctxMenu");
+  m.innerHTML = items.map(([a, l, i]) => `<button role="menuitem" data-act="${a}" data-id="${i}">${l}</button>`).join("");
+  m.hidden = false;
   m.style.left = Math.max(8, Math.min(e.clientX, innerWidth - m.offsetWidth - 8)) + "px";
   m.style.top = Math.max(8, Math.min(e.clientY, innerHeight - m.offsetHeight - 8)) + "px";
 });
 addEventListener("keydown", e => { if (e.key === "Escape") $("ctxMenu").hidden = true; });
 ["scroll", "resize", "blur"].forEach(ev => addEventListener(ev, () => { $("ctxMenu").hidden = true; }, true));
+
+/* ---------- drag channels and categories to reorder them ---------- */
+let drag = null;
+const clearDrop = () => document.querySelectorAll("#chList .drop-before, #chList .drop-after, #chList .drop-into, #chList .dragging").forEach(el => el.classList.remove("drop-before", "drop-after", "drop-into", "dragging"));
+const dropInfo = e => {
+  const t = e.target.closest?.("[data-drag]");
+  if (!t) return { zone: "end" };                       // empty space: end of the list
+  const r = t.getBoundingClientRect();
+  return { el: t, kind: t.dataset.drag, id: t.dataset.id, after: e.clientY > r.top + r.height / 2 };
+};
+$("chList").addEventListener("dragstart", e => {
+  const el = e.target.closest?.("[data-drag]");
+  if (!el || !can("manageChannels")) { e.preventDefault(); return; }
+  drag = { kind: el.dataset.drag, id: el.dataset.id };
+  e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", drag.id);
+  setTimeout(() => el.classList.add("dragging"), 0);
+});
+$("chList").addEventListener("dragover", e => {
+  if (!drag) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "move";
+  clearDrop();
+  const i = dropInfo(e);
+  if (i.el) i.el.classList.add(drag.kind === "chan" && i.kind === "cat" ? "drop-into" : i.after ? "drop-after" : "drop-before");
+});
+$("chList").addEventListener("drop", e => {
+  if (!drag) return;
+  e.preventDefault();
+  const d = drag, info = dropInfo(e); drag = null; clearDrop();
+  (d.kind === "chan" ? moveChannel(d.id, info) : moveCategory(d.id, info)).catch(err => { console.error(err); alert("Couldn't move that. You may not have permission."); });
+});
+$("chList").addEventListener("dragend", () => { drag = null; clearDrop(); });
+addEventListener("keydown", e => {                      // channel rows are div buttons so they can be dragged in every browser
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches?.("div.dm[data-act]")) { e.preventDefault(); e.target.click(); }
+});
