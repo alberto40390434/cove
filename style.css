@@ -269,3 +269,21 @@ b.plink:hover{text-decoration:underline}
 .pron,.pstat{color:var(--muted);font-size:13px}
 .bio{white-space:pre-wrap;overflow-wrap:anywhere}
 .msep{height:1px;margin:4px 0;background:var(--line)}
+
+/* ---- drag to reorder, channel gear, private channels ---- */
+.dm{cursor:pointer}
+.dm:focus-visible{outline:2px solid var(--accent)}
+.dm svg{margin-left:4px;color:var(--muted)}
+.chwrap{position:relative}
+.chgear{position:absolute;right:2px;top:50%;width:26px;height:26px;transform:translateY(-50%);opacity:0}
+.chwrap:hover .chgear,.chgear:focus-visible,.cat:hover .chgear{opacity:1}
+.cat{position:relative;display:flex;align-items:center;justify-content:space-between}
+.cat .chgear{position:static;transform:none}
+@media (hover:none){.chgear{opacity:1}}
+.dragging{opacity:.4}
+.drop-before{box-shadow:0 -2px 0 var(--accent)}
+.drop-after{box-shadow:0 2px 0 var(--accent)}
+.drop-into{background:var(--raised);outline:1px dashed var(--accent)}
+.chk{display:flex;gap:10px;align-items:flex-start;color:var(--text);font-size:14px}
+.chk input{margin-top:4px}
+.chk small{display:block;color:var(--muted);font-size:12px;font-weight:400}
