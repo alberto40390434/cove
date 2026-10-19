@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendEmailVerification }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
-  onSnapshot, addDoc, serverTimestamp, writeBatch, getDocs }
+  onSnapshot, addDoc, serverTimestamp, writeBatch, getDocs, FieldPath, arrayUnion, arrayRemove }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { getDatabase, ref as dbRef, set, onValue, onDisconnect, serverTimestamp as rtStamp }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
@@ -187,7 +187,7 @@ function openChat(r) {
   closeServer(); chatUnsub?.();
   chat = { id: r.id, uid: other(r), name: nameOf(r) }; chatMsgs = [];
   const u1 = onSnapshot(query(collection(db, "chats", r.id, "messages"), orderBy("createdAt"), limit(200)),
-    s => { chatMsgs = s.docs.map(d => d.data()); if (chat) render(); }, err => console.error(err));
+    s => { chatMsgs = s.docs.map(d => ({ id: d.id, ...d.data() })); if (chat) render(); }, err => console.error(err));
   const u2 = onSnapshot(collection(db, "chats", r.id, "participants"),
     s => { if (chat?.id === r.id) { chat.parts = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); } }, err => console.error(err));
   chatUnsub = () => { u1(); u2(); };
@@ -500,6 +500,7 @@ function rowHtml(r) {
 
 function shell(key, html, bind) {
   if (shellFor === key) return;
+  replyDraft = null;
   $("view").innerHTML = html; $("view").classList.toggle("chat", key.startsWith("chat:") || key.startsWith("srv:"));
   shellFor = key; bind();
 }
@@ -512,24 +513,92 @@ function fillList() {
   $("list").innerHTML = `<div class="count">${label} — ${list.length}</div>` + (list.map(rowHtml).join("") || `<div class="empty">${empty}</div>`);
 }
 
-function fillMsgs(list, who, emptyText, colorOf, delOf) {
+/* ---------- replies and reactions ---------- */
+Object.assign(I, {
+  smile: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>`,
+  reply: `<svg viewBox="0 0 24 24"><path d="M10 7L4 12l6 5M4 12h10a6 6 0 0 1 6 6v1"/></svg>`,
+  dots: `<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>`
+});
+const EMOJI = "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😍 🥰 😘 😋 😛 😜 🤪 😎 🤓 🥳 😏 😒 😞 😔 😟 😕 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🤭 🤫 😶 😐 😑 😬 🙄 😯 😦 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 👍 👎 👌 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ✋ 👋 👏 🙌 🤲 🙏 💪 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 💖 💯 💢 💥 💫 💦 🔥 ✨ ⭐ 🌟 🎉 🎊 🎈 ✅ ❌ ❓ ❗ 💀 👀 🙈 🙉 🙊 🐶 🐱 🐸 🍕 🍔 🍟 🍿 ☕ 🍺 🎮 🎵 🏆 🚀".split(" ");
+const hidePops = () => ["ctxMenu", "statusMenu", "msgMenu", "picker"].forEach(id => { $(id).hidden = true; });
+const placeAt = (el, x, y) => {
+  el.style.left = Math.max(8, Math.min(x, innerWidth - el.offsetWidth - 8)) + "px";
+  el.style.top = Math.max(8, Math.min(y, innerHeight - el.offsetHeight - 8)) + "px";
+};
+// the messages on screen belong to either an open friend chat or an open server channel
+const msgCol = () => chat ? collection(db, "chats", chat.id, "messages") : srv?.cid ? collection(db, "servers", srv.id, "channels", srv.cid, "messages") : null;
+const curMsgs = () => chat ? chatMsgs : srv?.msgs || [];
+const nameOfUid = uid => uid === me.uid ? me.username : chat ? chat.name : srv?.members.find(x => x.id === uid)?.name || "Someone";
+let replyDraft = null, pickTarget = null;
+
+async function toggleReact(mid, e) {
+  const col = msgCol(), m = curMsgs().find(x => x.id === mid); if (!col || !m) return;
+  const mine = (m.reactions?.[e] || []).includes(me.uid);
+  await updateDoc(doc(col, mid), new FieldPath("reactions", e), mine ? arrayRemove(me.uid) : arrayUnion(me.uid));
+}
+function renderReplyBar() {
+  const b = $("replyBar"); if (!b) return;
+  if (!replyDraft) { b.hidden = true; return; }
+  b.hidden = false;
+  b.innerHTML = `${I.reply}<span>Replying to <b>${esc(replyDraft.name)}</b></span><span class="rt">${esc(replyDraft.text)}</span><button class="ib" data-act="cancelreply" aria-label="Cancel reply" title="Cancel reply">${I.x}</button>`;
+}
+function setReply(m) {
+  replyDraft = { id: m.id, from: m.from || "", name: nameOfUid(m.from), text: String(m.text || "").slice(0, 100) };
+  renderReplyBar(); $("msgIn")?.focus();
+}
+function openPicker(mid, rect) {
+  pickTarget = mid;
+  const p = $("picker");
+  if (!p.dataset.built) { p.innerHTML = EMOJI.map(e => `<button data-act="pickemoji" data-e="${e}" aria-label="${e}">${e}</button>`).join(""); p.dataset.built = "1"; }
+  p.hidden = false; placeAt(p, rect.left, rect.bottom + 6);
+}
+function openMsgMenu(mid, x, y) {
+  const m = curMsgs().find(q => q.id === mid); if (!m) return;
+  const canDel = m.from === me.uid || (!!srv && !chat && can("manageMessages"));
+  const mm = $("msgMenu");
+  mm.innerHTML = `<div class="qrow">${["✅", "❤️", "🔥", "👍"].map(e => `<button data-act="react" data-id="${mid}" data-e="${e}" aria-label="React ${e}">${e}</button>`).join("")}</div>
+    <button role="menuitem" data-act="pickreact" data-id="${mid}">Add Reaction</button><div class="msep"></div>
+    <button role="menuitem" data-act="reply" data-id="${mid}">Reply</button>
+    <button role="menuitem" data-act="copytext" data-id="${mid}">Copy Text</button>
+    ${canDel ? `<div class="msep"></div><button role="menuitem" class="red" data-act="delmsg" data-id="${mid}">Delete Message</button>` : ""}`;
+  mm.hidden = false; placeAt(mm, x, y);
+}
+function jumpTo(id) {
+  const el = [...document.querySelectorAll("#msgs .m")].find(x => x.dataset.mid === id); if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1400);
+}
+
+const mTools = m => `<div class="mtools">${["✅", "❤️", "🔥"].map(e => `<button class="ib qk" data-act="react" data-id="${m.id}" data-e="${e}" aria-label="React ${e}">${e}</button>`).join("")}<span class="vsep"></span><button class="ib" data-act="pickreact" data-id="${m.id}" aria-label="Add reaction" title="Add reaction">${I.smile}</button><button class="ib rp" data-act="reply" data-id="${m.id}" aria-label="Reply" title="Reply">${I.reply}</button><button class="ib" data-act="msgmenu" data-id="${m.id}" aria-label="More" title="More">${I.dots}</button></div>`;
+const rxChips = m => {
+  const list = Object.entries(m.reactions || {}).filter(([e, u]) => Array.isArray(u) && u.length && e.length <= 16);
+  if (!list.length) return "";
+  return `<div class="rxs">` + list.map(([e, u]) => `<button class="rx ${u.includes(me.uid) ? "mine" : ""}" data-act="react" data-id="${m.id}" data-e="${esc(e)}" title="${esc(u.map(nameOfUid).join(", "))}">${esc(e)} <span>${u.length}</span></button>`).join("")
+    + `<button class="rx add" data-act="pickreact" data-id="${m.id}" aria-label="Add reaction" title="Add reaction">${I.smile}</button></div>`;
+};
+
+function fillMsgs(list, who, emptyText, colorOf) {
   const el = $("msgs"), near = !el.children.length || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   el.innerHTML = list.length ? list.map(m => {
     const n = who(m), c = colorOf?.(m), u = esc(m.from || ""), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
-    return `<div class="m"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div><b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p></div>${delOf?.(m) ? `<button class="ib mdel" data-act="delmsg" data-id="${m.id}" aria-label="Delete message" title="Delete message">${I.trash}</button>` : ""}</div>`;
+    const rp = m.replyTo && typeof m.replyTo === "object"
+      ? `<div class="mreply" data-act="jumpmsg" data-id="${esc(m.replyTo.id || "")}">${I.reply}<b>${esc(m.replyTo.name || "Someone")}</b><span class="rt">${esc(m.replyTo.text || "")}</span></div>` : "";
+    return `<div class="m" data-mid="${esc(m.id || "")}"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div class="mbody">${rp}<b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p>${rxChips(m)}</div>${m.id ? mTools(m) : ""}</div>`;
   }).join("") : `<div class="empty">${esc(emptyText)}</div>`;
   if (near) el.scrollTop = el.scrollHeight;
 }
 
-const msgPane = ph => `<div id="msgs" aria-live="polite"></div><form class="send" id="sendForm"><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form>`;
+const msgPane = ph => `<div id="msgs" aria-live="polite"></div><div class="replybar" id="replyBar" hidden></div><form class="send" id="sendForm"><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form>`;
 const bindSend = (col, extra = () => ({})) => () => {
   $("sendForm").onsubmit = async e => {
     e.preventDefault();
     const i = $("msgIn"), text = i.value.trim(); if (!text) return;
-    i.value = "";
-    try { await addDoc(col(), { from: me.uid, text, ...extra(), createdAt: serverTimestamp() }); }
-    catch (err) { i.value = text; console.error(err); }
+    const rd = replyDraft;
+    i.value = ""; replyDraft = null; renderReplyBar();
+    try { await addDoc(col(), { from: me.uid, text, ...extra(), ...(rd ? { replyTo: rd } : {}), createdAt: serverTimestamp() }); }
+    catch (err) { i.value = text; replyDraft = rd; renderReplyBar(); console.error(err); }
   };
+  renderReplyBar();
   $("msgIn").focus();
 };
 
@@ -867,11 +936,11 @@ function render() {
 /* ---------- clicks ---------- */
 document.addEventListener("click", e => {
   const t = e.target.closest("[data-act],[data-tab]");
-  if (!t || !me) { if (!t) { $("statusMenu").hidden = true; $("ctxMenu").hidden = true; } return; }
-  const appEl = $("app"), a0 = t.dataset.act;
+  if (!t || !me) { if (!t) hidePops(); return; }
+  const rect0 = t.getBoundingClientRect(), appEl = $("app"), a0 = t.dataset.act;
   if (t.dataset.tab || a0 === "home" || a0 === "chat" || (a0 === "chan" && t.dataset.type !== "voice")) { callView = false; renderCall(); }
   if (a0 === "statusmenu") { const m = $("statusMenu"); m.hidden = !m.hidden; $("meBtn").setAttribute("aria-expanded", String(!m.hidden)); return; }
-  $("statusMenu").hidden = true; $("ctxMenu").hidden = true;
+  hidePops();
   if (a0 === "setstatus") { setStatus(t.dataset.s); return; }
   if (a0 === "editprofile") { openProfile(me.uid, true); return; }
   if (a0 === "menu") { appEl.classList.toggle("nav-open"); appEl.classList.remove("mem-open"); return; }
@@ -929,9 +998,18 @@ document.addEventListener("click", e => {
       .catch(err => { console.error(err); $("edMsg").textContent = "Couldn't delete that."; });
   }
   else if (act === "closeedit") { $("edModal").hidden = true; edit = null; }
-  else if (act === "delmsg" && srv && srv.cid) {
-    if (confirm("Delete this message?")) deleteDoc(doc(db, "servers", srv.id, "channels", srv.cid, "messages", id)).catch(err => { console.error(err); alert("Couldn't delete that message."); });
+  else if (act === "delmsg") {
+    const col = msgCol();
+    if (col && confirm("Delete this message?")) deleteDoc(doc(col, id)).catch(err => { console.error(err); alert("Couldn't delete that message."); });
   }
+  else if (act === "react") toggleReact(id, t.dataset.e).catch(err => { console.error(err); alert("Couldn't add that reaction."); });
+  else if (act === "pickreact") openPicker(id, rect0);
+  else if (act === "pickemoji") { if (pickTarget) toggleReact(pickTarget, t.dataset.e).catch(err => { console.error(err); alert("Couldn't add that reaction."); }); }
+  else if (act === "reply") { const m = curMsgs().find(x => x.id === id); if (m) setReply(m); }
+  else if (act === "cancelreply") { replyDraft = null; renderReplyBar(); }
+  else if (act === "msgmenu") openMsgMenu(id, rect0.left, rect0.bottom);
+  else if (act === "copytext") { const m = curMsgs().find(x => x.id === id); if (m) navigator.clipboard?.writeText(m.text || "").catch(() => {}); }
+  else if (act === "jumpmsg") jumpTo(id);
   else if (act === "lockchan" && srv) {
     const c = srv.channels.find(x => x.id === id);
     if (c) updateDoc(chRef(id), { locked: !c.locked }).catch(err => { console.error(err); alert("Couldn't change that channel."); });
@@ -1060,7 +1138,7 @@ $("chList").addEventListener("contextmenu", e => {
   m.style.top = Math.max(8, Math.min(e.clientY, innerHeight - m.offsetHeight - 8)) + "px";
 });
 addEventListener("keydown", e => { if (e.key === "Escape") $("ctxMenu").hidden = true; });
-["scroll", "resize", "blur"].forEach(ev => addEventListener(ev, () => { $("ctxMenu").hidden = true; }, true));
+["scroll", "resize", "blur"].forEach(ev => addEventListener(ev, e => { if (e.target?.closest?.("#picker, #msgMenu")) return; hidePops(); }, true));
 
 /* ---------- drag channels and categories to reorder them ---------- */
 let drag = null;
@@ -1094,4 +1172,15 @@ $("chList").addEventListener("drop", e => {
 $("chList").addEventListener("dragend", () => { drag = null; clearDrop(); });
 addEventListener("keydown", e => {                      // channel rows are div buttons so they can be dragged in every browser
   if ((e.key === "Enter" || e.key === " ") && e.target.matches?.("div.dm[data-act]")) { e.preventDefault(); e.target.click(); }
+});
+
+/* ---------- right-click a message ---------- */
+$("view").addEventListener("contextmenu", e => {
+  const m = e.target.closest(".m[data-mid]"); if (!m || !m.dataset.mid) return;
+  e.preventDefault(); hidePops(); openMsgMenu(m.dataset.mid, e.clientX, e.clientY);
+});
+addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  hidePops();
+  if (replyDraft) { replyDraft = null; renderReplyBar(); }
 });
