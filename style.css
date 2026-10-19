@@ -336,3 +336,9 @@ b.plink:hover{text-decoration:underline}
 .picker{position:fixed;z-index:30;display:grid;grid-template-columns:repeat(8,1fr);gap:2px;width:min(320px,calc(100vw - 16px));max-height:240px;overflow-y:auto;padding:8px;background:var(--raised);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
 .picker button{height:34px;border-radius:6px;font-size:20px}
 .picker button:hover{background:var(--panel)}
+
+/* ---- keep the page exactly as tall as the window: messages scroll, the type bar stays put ---- */
+html{overflow:hidden}
+.app{grid-template-rows:minmax(0,1fr);overflow:hidden}
+.rail,.side,.main,.active{min-height:0}
+.main{overflow:hidden}
