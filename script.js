@@ -1,7 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendEmailVerification }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, deleteField, collection, query, where, orderBy, limit,
   onSnapshot, addDoc, serverTimestamp, writeBatch, getDocs, FieldPath, arrayUnion, arrayRemove }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { getDatabase, ref as dbRef, set, onValue, onDisconnect, serverTimestamp as rtStamp }
@@ -22,7 +22,13 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const colors = ["#7fd1c0","#c4a7f0","#f2b97a","#8fb8f5","#f09aa5","#b5d88a"];
 const color = n => colors[[...n].reduce((a, c) => a + c.charCodeAt(0), 0) % colors.length];
-const av = (n, s = "") => `<div class="av ${s}" style="background:${color(n)}">${esc((n[0] || "?").toUpperCase())}</div>`;
+const avatarByName = {};   // lowercase username -> profile picture (data URL or https link); usernames are unique
+const av = (n, s = "") => {
+  const img = avatarByName[String(n).toLowerCase()];
+  return img
+    ? `<div class="av ${s}" style="background:#222 url(${esc(img)}) center/cover no-repeat"></div>`
+    : `<div class="av ${s}" style="background:${color(n)}">${esc((n[0] || "?").toUpperCase())}</div>`;
+};
 const I = {
   chat: `<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-3.9A8 8 0 1 1 20 12z"/></svg>`,
   check: `<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`,
@@ -92,6 +98,7 @@ function stop() {
   timers.forEach(clearInterval);
   unsubs = []; watchers = {}; timers = []; chatUnsub = null;
   rels = []; profiles = {}; presence = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
+  Object.keys(avatarByName).forEach(k => delete avatarByName[k]);
 }
 
 onAuthStateChanged(auth, async u => {
@@ -116,9 +123,9 @@ onAuthStateChanged(auth, async u => {
   if (!snap.data().createdAt) updateDoc(doc(db, "users", u.uid), { createdAt: new Date(u.metadata.creationTime) }).catch(console.error);
   $("auth").hidden = true; $("app").hidden = false;
   $("meName").textContent = me.username;
-  $("meAv").textContent = me.username[0].toUpperCase(); $("meAv").style.background = color(me.username);
+  applyMeAvatar();
 
-  startPresence(); warmCalls();
+  startPresence(); warmCalls(); watch(me.uid);
 
   unsubs.push(onSnapshot(query(collection(db, "friendships"), where("users", "array-contains", me.uid)), s => {
     rels = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -158,7 +165,7 @@ function setStatus(s) {
 
 function watch(uid) {
   if (watchers[uid]) return;
-  const a = onSnapshot(doc(db, "users", uid), s => { profiles[uid] = s.data(); render(); });
+  const a = onSnapshot(doc(db, "users", uid), s => { const p = profiles[uid] = s.data(); syncAvatar(uid, p); render(); });
   const b = onValue(dbRef(rtdb, "status/" + uid), s => { presence[uid] = s.val()?.state || "offline"; render(); });
   watchers[uid] = () => { a(); b(); };
 }
@@ -774,6 +781,99 @@ async function deleteRole(id) {
   return true;
 }
 
+/* ---------- profile pictures and banners ---------- */
+// Two ways to set one: upload a file (stored in Firestore; anything but a GIF is shrunk first)
+// or paste a link (works for animated GIFs of any size, only the link is stored).
+const DATA_OK = /^data:image\/(gif|webp|jpeg|png);base64,[A-Za-z0-9+/=]+$/;
+const LINK_OK = /^https:\/\/[^\s"'()<>\\]{4,480}$/;
+const mediaP = {}, GIF_MAX = { avatar: 250 * 1024, banner: 700 * 1024 };
+let profUid = null;
+
+const hasImg = (kind, p) => !!(p && (p[kind + "Url"] || p[kind + "Ver"]));
+const sig = (kind, p) => (p?.[kind + "Url"] || "") + "|" + (p?.[kind + "Ver"] || 0);
+
+function loadMedia(uid, kind, ver) {       // uploaded files live in users/{uid}/media/{kind}; cached for the session
+  if (!ver) return Promise.resolve(null);
+  const k = `${uid}:${kind}:${ver}`;
+  return mediaP[k] ||= getDoc(doc(db, "users", uid, "media", kind))
+    .then(s => { const d = s.data()?.data; return typeof d === "string" && DATA_OK.test(d) ? d : null; })
+    .catch(() => null);
+}
+// other people's values are checked here before they are ever put on the page
+const imgSrc = (uid, kind, p) => LINK_OK.test(p?.[kind + "Url"] || "") ? Promise.resolve(p[kind + "Url"]) : loadMedia(uid, kind, p?.[kind + "Ver"]);
+
+function syncAvatar(uid, p) {
+  if (!p?.username) return;
+  const key = p.username.toLowerCase(), s0 = sig("avatar", p);
+  if (!hasImg("avatar", p)) {
+    if (avatarByName[key]) { delete avatarByName[key]; if (uid === me?.uid) applyMeAvatar(); render(); }
+    return;
+  }
+  imgSrc(uid, "avatar", p).then(d => {
+    if (!d || sig("avatar", profiles[uid]) !== s0 || avatarByName[key] === d) return;
+    avatarByName[key] = d;
+    if (uid === me?.uid) applyMeAvatar();
+    const pb = document.querySelector("#profBody .pbig");
+    if (profUid === uid && pb && !pb.dataset.pending) pb.innerHTML = av(p.username, dotCls(uid));
+    render();
+  });
+}
+
+function applyMeAvatar() {
+  const el = $("meAv"), img = avatarByName[me.username.toLowerCase()];
+  el.textContent = img ? "" : me.username[0].toUpperCase();
+  el.style.background = img ? `#222 url(${img}) center/cover no-repeat` : color(me.username);
+}
+
+function showBanner(uid, u) {
+  if (!hasImg("banner", u)) return;
+  imgSrc(uid, "banner", u).then(d => {
+    const el = document.querySelector("#profBody .pbanner");
+    if (d && el && profUid === uid && !el.dataset.pending) el.style.backgroundImage = `url(${d})`;
+  });
+}
+
+const fileToDataURL = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+const loadImg = src => new Promise((res, rej) => { const i = new Image(), t = setTimeout(rej, 10000); i.onload = () => { clearTimeout(t); res(i); }; i.onerror = () => { clearTimeout(t); rej(); }; i.src = src; });
+
+async function prepareImage(file, kind) {
+  if (!/^image\/(gif|png|jpeg|webp)$/.test(file.type)) throw new Error("Pick a PNG, JPG, WebP, or GIF image.");
+  const avatar = kind === "avatar";
+  if (file.type === "image/gif") {                      // GIFs go up untouched so they keep animating
+    if (file.size > GIF_MAX[kind]) throw new Error(`That GIF is ${Math.round(file.size / 1024)} KB and the upload limit is ${GIF_MAX[kind] / 1024} KB. Paste a link to it instead, which has no size limit.`);
+    return fileToDataURL(file);
+  }
+  const url = URL.createObjectURL(file);                // everything else: crop to fit and compress
+  try {
+    const img = await loadImg(url), [W, H] = avatar ? [192, 192] : [960, 320];
+    const c = document.createElement("canvas"); c.width = W; c.height = H;
+    const s = Math.max(W / img.width, H / img.height), w = img.width * s, h = img.height * s;
+    c.getContext("2d").drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+    const out = c.toDataURL("image/webp", 0.85);
+    return out.startsWith("data:image/webp") ? out : c.toDataURL("image/jpeg", 0.85);   // Safari can't export webp
+  } finally { URL.revokeObjectURL(url); }
+}
+
+async function checkLink(raw) {
+  const url = raw.trim();
+  if (!LINK_OK.test(url)) throw new Error("Paste a direct link that starts with https:// and points at the image itself, like one ending in .gif or .png.");
+  try { await loadImg(url); } catch { throw new Error("That link didn't load as an image. Right-click the image and choose Copy image address."); }
+  return url;
+}
+
+async function saveMedia(kind, dataUrl) {
+  await setDoc(doc(db, "users", me.uid, "media", kind), { data: dataUrl, updatedAt: serverTimestamp() });
+  await updateDoc(doc(db, "users", me.uid), { [kind + "Ver"]: Date.now(), [kind + "Url"]: deleteField() });
+}
+async function saveLink(kind, url) {
+  await updateDoc(doc(db, "users", me.uid), { [kind + "Url"]: url, [kind + "Ver"]: deleteField() });
+  await deleteDoc(doc(db, "users", me.uid, "media", kind)).catch(() => {});
+}
+async function removeMedia(kind) {
+  await updateDoc(doc(db, "users", me.uid), { [kind + "Url"]: deleteField(), [kind + "Ver"]: deleteField() });
+  await deleteDoc(doc(db, "users", me.uid, "media", kind)).catch(() => {});
+}
+
 /* ---------- profiles ---------- */
 const fmtDate = d => d ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "Unknown";
 
@@ -788,23 +888,62 @@ async function openProfile(uid, edit = false) {
 }
 
 function renderProfile(uid, u, editing) {
+  profUid = uid;
   const mine = uid === me.uid, banner = okHex(u.bannerColor) ? u.bannerColor : "#5ec8b4", name = u.username || "Unknown";
   const made = u.createdAt?.toDate?.() || (mine ? new Date(auth.currentUser.metadata.creationTime) : null);
   const mem = srv?.members.find(x => x.id === uid);
-  const head = `<div class="pbanner" style="background:${banner}"></div><div class="pbig">${av(name, dotCls(uid))}</div>`;
+  const head = `<div class="pbanner" style="background-color:${banner}"></div><div class="pbig">${av(name, dotCls(uid))}</div>`;
   if (editing) {
+    const pend = {};
+    const picker = (id, label, hint) => `<div class="fld">${label} <small class="hintline">${hint}</small>
+        <div class="row-actions"><label class="filebtn">Upload<input type="file" id="${id}File" accept="image/gif,image/png,image/jpeg,image/webp" hidden></label><button type="button" class="link" id="${id}Rm">Remove</button></div>
+        <div class="row-actions"><input id="${id}Url" class="urlin" placeholder="Or paste an image or GIF link (https://...)" autocomplete="off" aria-label="${label} link"><button type="button" class="filebtn" id="${id}Use">Use link</button></div></div>`;
     $("profBody").innerHTML = head + `<form id="profForm" class="pform"><h2>Edit profile</h2>
+      ${picker("pAv", "Profile picture", "Uploads: PNG, JPG, WebP, or a GIF up to 250 KB. Links: any size.")}
+      ${picker("pBn", "Banner image", "Uploads: PNG, JPG, WebP, or a GIF up to 700 KB. Links: any size.")}
       <label class="fld">Pronouns<input id="pPron" maxlength="24" value="${esc(u.pronouns || "")}" placeholder="for example: she/her" autocomplete="off"></label>
       <label class="fld">About me<textarea id="pBio" maxlength="190" rows="4" placeholder="Tell people about yourself">${esc(u.bio || "")}</textarea></label>
       <div class="fld">Banner color<div class="swatches">${SWATCHES.map(c => `<button type="button" class="sw ${c === banner ? "on" : ""}" data-act="pickbanner" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join("")}<input type="color" id="pColor" value="${banner}" aria-label="Custom color"></div></div>
       <div class="row-actions"><button class="primary" type="submit">Save</button><button class="link" type="button" data-act="closeprof">Cancel</button></div><div class="msg" id="profMsg" role="status"></div></form>`;
-    $("pColor").oninput = e => { document.querySelector(".pbanner").style.background = e.target.value; };
+    showBanner(uid, u);
+    const say = t => { $("profMsg").textContent = t; };
+    const preview = kind => {                            // show the chosen image right away, before saving
+      const v = pend[kind], has = v && !v.remove;
+      if (kind === "avatar") {
+        const el = document.querySelector("#profBody .pbig"); el.dataset.pending = "1";
+        el.innerHTML = has ? `<div class="av nodot" style="background:#222 url(${esc(v.v)}) center/cover no-repeat"></div>` : `<div class="av nodot" style="background:${color(name)}">${esc(name[0].toUpperCase())}</div>`;
+      } else {
+        const el = document.querySelector("#profBody .pbanner"); el.dataset.pending = "1";
+        el.style.backgroundImage = has ? `url(${v.v})` : "none";
+      }
+    };
+    [["avatar", "pAv"], ["banner", "pBn"]].forEach(([kind, id]) => {
+      $(id + "File").onchange = async e => {
+        const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+        try { pend[kind] = { v: await prepareImage(f, kind) }; $(id + "Url").value = ""; say(""); preview(kind); }
+        catch (err) { say(err.message || "Couldn't read that image."); }
+      };
+      $(id + "Use").onclick = async () => {
+        const b = $(id + "Use"); b.disabled = true; say("Checking link...");
+        try { pend[kind] = { v: await checkLink($(id + "Url").value), link: true }; say(""); preview(kind); }
+        catch (err) { say(err.message || "That link didn't work."); }
+        finally { b.disabled = false; }
+      };
+      $(id + "Url").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); $(id + "Use").click(); } };
+      $(id + "Rm").onclick = () => { pend[kind] = { remove: true }; $(id + "Url").value = ""; say(""); preview(kind); };
+    });
+    $("pColor").oninput = e => { document.querySelector(".pbanner").style.backgroundColor = e.target.value; };
     $("profForm").onsubmit = async e => {
       e.preventDefault();
+      const sb = $("profForm").querySelector(".primary"); sb.disabled = true; say("Saving...");
       try {
+        for (const kind of ["avatar", "banner"]) {
+          const p = pend[kind]; if (!p) continue;
+          if (p.remove) await removeMedia(kind); else if (p.link) await saveLink(kind, p.v); else await saveMedia(kind, p.v);
+        }
         await updateDoc(doc(db, "users", me.uid), { pronouns: $("pPron").value.trim(), bio: $("pBio").value.trim(), bannerColor: $("pColor").value });
         openProfile(me.uid, false);
-      } catch (err) { console.error(err); $("profMsg").textContent = "Couldn't save your profile."; }
+      } catch (err) { console.error(err); sb.disabled = false; say("Couldn't save your profile."); }
     };
     return;
   }
@@ -815,6 +954,7 @@ function renderProfile(uid, u, editing) {
     + (mem?.joinedAt?.toDate ? `<h4>Joined ${esc(srv.name)}</h4><p>${fmtDate(mem.joinedAt.toDate())}</p>` : "")
     + (roles.length ? `<h4>Roles</h4><div class="chips">${roles.map(r => `<span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span>`).join("")}</div>` : "")
     + `<div class="row-actions" style="margin-top:12px">${mine ? `<button class="primary" data-act="editprofile">Edit profile</button>` : ""}<button class="link" data-act="closeprof">Close</button></div></div>`;
+  showBanner(uid, u);
 }
 
 /* ---------- channel order, privacy, editing ---------- */
@@ -1028,7 +1168,7 @@ document.addEventListener("click", e => {
     if (m) setMemberRoles(m.id, (m.roles || []).filter(x => x !== id)).then(() => { if (editRole) refreshSettings(true); }).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't change that."; });
   }
   else if (act === "pickcolor") { if (roleDraft) roleDraft.color = t.dataset.color; $("rColor").value = t.dataset.color; document.querySelectorAll("#setBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
-  else if (act === "pickbanner") { $("pColor").value = t.dataset.color; document.querySelector(".pbanner").style.background = t.dataset.color; document.querySelectorAll("#profBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
+  else if (act === "pickbanner") { $("pColor").value = t.dataset.color; document.querySelector(".pbanner").style.backgroundColor = t.dataset.color; document.querySelectorAll("#profBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
   else if (act === "profile") openProfile(t.dataset.uid);
   else if (act === "closeprof") $("profModal").hidden = true;
   else if (act === "editchan" && srv) openEdit("chan", id);
