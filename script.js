@@ -402,7 +402,7 @@ async function createServer(name) {
   await setDoc(doc(db, "servers", id, "roles", "everyone"), { name: "everyone", perms: DEFAULT_PERMS, createdAt: serverTimestamp() });
   await setDoc(doc(db, "servers", id, "members", me.uid), { name: me.username, roles: [], perms: {}, joinedAt: serverTimestamp() });
   await addDoc(collection(db, "servers", id, "channels"), { name: "general", type: "text", createdAt: serverTimestamp() });
-  await setDoc(doc(db, "users", me.uid, "servers", id), { name });
+  await setDoc(doc(db, "users", me.uid, "servers", id), { name, owner: true });
   return id;
 }
 
@@ -452,13 +452,14 @@ function openServer(id, name) {
   const live = fn => d => { if (srv === s) fn(d); }, bad = err => console.error(err), col = (...p) => collection(db, "servers", id, ...p);
   s.u.push(
     onSnapshot(doc(db, "servers", id), live(d => {
-      if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner; migrate(s); }
+      if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner; migrate(s);
+        if (s.owner === me.uid && !myServers.find(x => x.id === id)?.owner) setDoc(doc(db, "users", me.uid, "servers", id), { owner: true }, { merge: true }).catch(() => {}); }
       render();
     }), err => {
       console.error(err);
       if (err.code === "permission-denied" && srv === s) {
         closeServer(); render(); deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
-        alert("You're no longer a member of that server.");
+        alert("That server was deleted, or you're no longer a member of it.");
       }
     }),
     onSnapshot(col("channels"), live(c => {
@@ -480,10 +481,54 @@ function openServer(id, name) {
   shellFor = null; render();
 }
 
-async function leaveServer() {
-  const id = srv.id; closeServer(); render();
+function showCtx(items, x, y) {
+  const m = $("ctxMenu");
+  m.innerHTML = items.map(([a, l, i, cls]) => a === "sep" ? `<div class="msep"></div>` : `<button role="menuitem" class="${cls || ""}" data-act="${a}" data-id="${i || ""}">${l}</button>`).join("");
+  m.hidden = false; placeAt(m, x, y);
+}
+
+async function leaveServerById(id, name) {
+  let owner = null;
+  try { owner = (await getDoc(doc(db, "servers", id))).data()?.owner; } catch (e) { console.error(e); }   // fails if the server is gone: then we just tidy up the list
+  if (owner === me.uid) { alert("You own this server, so you can't leave it. Open its menu and delete it instead."); return false; }
+  if (!confirm(`Leave ${name}?`)) return false;
+  if (srv?.id === id) { closeServer(); render(); }
   try { await deleteDoc(doc(db, "servers", id, "members", me.uid)); } catch (e) { console.error(e); }
-  deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
+  await deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
+  return true;
+}
+
+async function deleteServerById(id, name) {
+  let owner = null;
+  try { owner = (await getDoc(doc(db, "servers", id))).data()?.owner; } catch (e) { console.error(e); }
+  if (owner !== me.uid) { alert("Only the server's owner can delete it."); return false; }
+  const typed = prompt(`This permanently deletes "${name}" with every channel, message, role, and member. It can't be undone.\n\nType the server name to confirm:`);
+  if (typed === null) return false;
+  if (typed.trim() !== name) { alert("That didn't match the server name, so nothing was deleted."); return false; }
+  if (srv?.id === id) { closeServer(); render(); }
+  const sub = (...p) => collection(db, "servers", id, ...p);
+  const wipe = async (colRef, size) => {                 // deletes a whole collection in small batches
+    for (;;) {
+      const snap = await getDocs(query(colRef, limit(size)));
+      if (snap.empty) return;
+      const b = writeBatch(db); snap.docs.forEach(d => b.delete(d.ref)); await b.commit();
+    }
+  };
+  try {
+    const chans = await getDocs(sub("channels"));
+    for (const c of chans.docs) await wipe(sub("channels", c.id, "messages"), 8);
+    await wipe(sub("channels"), 5); await wipe(sub("categories"), 5); await wipe(sub("roles"), 5);
+    const others = (await getDocs(sub("members"))).docs.filter(d => d.id !== me.uid);
+    for (let i = 0; i < others.length; i += 5) { const b = writeBatch(db); others.slice(i, i + 5).forEach(d => b.delete(d.ref)); await b.commit(); }
+    await deleteDoc(doc(db, "servers", id, "members", me.uid));
+    await deleteDoc(doc(db, "servers", id));
+    await deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
+    return true;
+  } catch (err) {
+    console.error(err);
+    alert("Something went wrong while deleting, so part of the server may be gone. Open its menu and try deleting again to finish.");
+    return false;
+  }
 }
 
 /* ---------- rendering ---------- */
@@ -1031,7 +1076,17 @@ document.addEventListener("click", e => {
     const vo = $("chType").querySelector('option[value="voice"]'); vo.hidden = vo.disabled = !CALLS_ON; $("chType").value = "text";
     $("chModal").hidden = false; $(act === "ctxcat" ? "catName" : "chName").focus();
   }
-  else if (act === "leave" && srv && confirm(`Leave ${srv.name}?`)) leaveServer();
+  else if (act === "leave" && srv) leaveServerById(srv.id, srv.name).catch(err => { console.error(err); alert("Couldn't leave that server."); });
+  else if (act === "leaveid") leaveServerById(id, myServers.find(x => x.id === id)?.name || "this server").catch(err => { console.error(err); alert("Couldn't leave that server."); });
+  else if (act === "delserver" && srv) deleteServerById(srv.id, srv.name).catch(err => { console.error(err); alert("Couldn't delete that server."); });
+  else if (act === "delserverid") deleteServerById(id, myServers.find(x => x.id === id)?.name || "").catch(err => { console.error(err); alert("Couldn't delete that server."); });
+  else if (act === "srvmenu" && srv) {
+    const items = [["invite", "Invite People", ""]];
+    if (can("manageRoles") || can("kickMembers")) items.push(["settings", "Server Settings", ""]);
+    if (can("manageChannels")) items.push(["newchannel", "Create Channel", ""], ["ctxcat", "Create Category", ""]);
+    items.push(["sep"], srv.owner === me.uid ? ["delserver", "Delete Server", "", "red"] : ["leave", "Leave Server", "", "red"]);
+    showCtx(items, rect0.left, rect0.bottom + 4);
+  }
   else if (act === "chat" && r) openChat(r);
   else if (act === "accept") updateDoc(ref, { status: "accepted" });
   else if (act === "decline" || act === "cancel") deleteDoc(ref);
@@ -1183,4 +1238,12 @@ addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
   hidePops();
   if (replyDraft) { replyDraft = null; renderReplyBar(); }
+});
+
+/* ---------- right-click a server icon ---------- */
+$("servers").addEventListener("contextmenu", e => {
+  const b = e.target.closest('.srv[data-act="server"]'); if (!b) return;
+  e.preventDefault(); hidePops();
+  const mine = myServers.find(x => x.id === b.dataset.id);
+  showCtx([["server", "Open server", b.dataset.id], ["sep"], mine?.owner ? ["delserverid", "Delete Server", b.dataset.id, "red"] : ["leaveid", "Leave Server", b.dataset.id, "red"]], e.clientX, e.clientY);
 });
