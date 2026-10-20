@@ -342,3 +342,9 @@ html{overflow:hidden}
 .app{grid-template-rows:minmax(0,1fr);overflow:hidden}
 .rail,.side,.main,.active{min-height:0}
 .main{overflow:hidden}
+
+/* ---- server menu ---- */
+.srvname{display:flex;align-items:center;gap:6px;min-width:0;font-weight:700;text-align:left}
+.srvname #srvName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srvname svg{width:16px;height:16px;color:var(--muted)}
+.srvhead>.srvname{flex:1}
