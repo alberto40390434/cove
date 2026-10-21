@@ -1253,7 +1253,8 @@ $("chList").addEventListener("contextmenu", e => {
   m.style.top = Math.max(8, Math.min(e.clientY, innerHeight - m.offsetHeight - 8)) + "px";
 });
 addEventListener("keydown", e => { if (e.key === "Escape") $("ctxMenu").hidden = true; });
-["scroll", "resize", "blur"].forEach(ev => addEventListener(ev, e => { if (e.target?.closest?.("#picker, #msgMenu")) return; hidePops(); }, true));
+["scroll", "resize"].forEach(ev => addEventListener(ev, e => { if (e.target?.closest?.("#picker, #msgMenu, #statusMenu, #ctxMenu")) return; hidePops(); }, true));
+addEventListener("blur", e => { if (e.target === window) hidePops(); });      // leaving the tab closes menus; clicking inside the page must not
 
 /* ---------- drag channels and categories to reorder them ---------- */
 let drag = null;
