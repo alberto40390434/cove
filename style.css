@@ -259,7 +259,7 @@ input[type=color]{width:36px;height:30px;padding:0;border:0;background:none;curs
 b.plink:hover{text-decoration:underline}
 .card.plink:hover{background:var(--raised)}
 .authbox.prof{max-width:360px;padding:0;overflow:hidden}
-.pbanner{height:120px;background:var(--accent) center/cover no-repeat}
+.pbanner{height:120px;background:var(--accent);background-size:cover;background-position:center}
 .pbig{margin:-40px 0 0 18px}
 .pbig .av{width:80px;height:80px;font-size:32px;border:5px solid var(--panel)}
 .pbig .av::after{right:0;bottom:0;width:20px;height:20px;border-width:4px}
@@ -269,14 +269,6 @@ b.plink:hover{text-decoration:underline}
 .pron,.pstat{color:var(--muted);font-size:13px}
 .bio{white-space:pre-wrap;overflow-wrap:anywhere}
 .msep{height:1px;margin:4px 0;background:var(--line)}
-
-/* ---- profile picture and banner pickers ---- */
-.filebtn{padding:7px 14px;border-radius:8px;background:var(--raised);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
-.filebtn:hover{background:var(--bg)}
-.filebtn:disabled{opacity:.5;cursor:default}
-.fld .hintline{font-weight:400;font-size:12px;color:var(--muted)}
-.fld .urlin{flex:1;min-width:0}
-.pform{max-height:calc(100dvh - 160px);overflow-y:auto}
 
 /* ---- drag to reorder, channel gear, private channels ---- */
 .dm{cursor:pointer}
@@ -356,3 +348,7 @@ html{overflow:hidden}
 .srvname #srvName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .srvname svg{width:16px;height:16px;color:var(--muted)}
 .srvhead>.srvname{flex:1}
+
+/* ---- profile picture and banner uploads ---- */
+.upl{display:flex;align-items:center;gap:10px}
+.hint2{color:var(--muted);font-size:12px;font-weight:400}
