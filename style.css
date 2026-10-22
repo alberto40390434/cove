@@ -352,3 +352,15 @@ html{overflow:hidden}
 /* ---- profile picture and banner uploads ---- */
 .upl{display:flex;align-items:center;gap:10px}
 .hint2{color:var(--muted);font-size:12px;font-weight:400}
+
+/* ---- image posting, notes ---- */
+.attach{flex:none}
+.attachbar{display:flex;align-items:center;gap:10px;margin-top:8px;padding:6px 12px;border:1px solid var(--line);border-bottom:0;border-radius:8px 8px 0 0;background:var(--panel);color:var(--muted);font-size:13px}
+.attachbar img{width:40px;height:40px;object-fit:cover;border-radius:6px}
+.attachbar span{flex:1}
+.attachbar + .send,.replybar + .attachbar + .send{margin-top:0}
+.sendnote{margin-top:6px;color:var(--dnd);font-size:13px}
+.mimg{display:block;margin-top:6px}
+.mimg img{display:block;max-width:min(100%,420px);max-height:320px;border-radius:8px;background:var(--panel)}
+#setBody .upl input{flex:1;min-width:0;padding:9px 12px;font:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text)}
+#setBody textarea{padding:9px 12px;font:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);resize:vertical}
