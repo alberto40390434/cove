@@ -28,6 +28,7 @@ const CLOUD = { name: "dpe7v9jx", preset: "cove_profile" };
 const CLOUD_ON = !CLOUD.name.includes("YOUR_") && !CLOUD.preset.includes("YOUR_");
 const okImg = u => typeof u === "string" && u.length <= 300 && /^https:\/\/res\.cloudinary\.com\/[A-Za-z0-9_-]+\/image\/upload\/[A-Za-z0-9_.\/%~-]+$/.test(u);
 const thumb = (u, w, h) => u.replace("/image/upload/", `/image/upload/c_fill,w_${w},h_${h},q_auto/`);   // resized copy, GIFs stay animated
+const limitw = (u, w) => u.replace("/image/upload/", `/image/upload/c_limit,w_${w},q_auto/`);   // keeps the shape, GIFs stay animated
 const photoByName = Object.create(null);                 // usernames are unique, so pictures are looked up by username
 const setPhoto = d => { if (d?.username) { const k = d.username.toLowerCase(); if (okImg(d.avatarUrl)) photoByName[k] = d.avatarUrl; else delete photoByName[k]; } };
 const av = (n, s = "", url) => {
@@ -142,7 +143,7 @@ onAuthStateChanged(auth, async u => {
   $("auth").hidden = true; $("app").hidden = false;
   $("meName").textContent = me.username;
 
-  startPresence(); warmCalls();
+  startPresence(); warmCalls(); joinFromLink();
 
   unsubs.push(onSnapshot(query(collection(db, "friendships"), where("users", "array-contains", me.uid)), s => {
     rels = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -261,10 +262,13 @@ const extraPerms = (ids, roles) => {                     // what a person's role
 };
 
 /* ---------- calling: LiveKit (HD video, screen share, audio). Firestore only tracks who is in which call. ---------- */
-// Paste the address of your call server here (the Render Web Service made from the calls-server folder):
+// Paste the address of your Cove server here (the Render Web Service made from the calls-server folder).
+// It powers the AI message check, and later the calls.
 const CALL_API = "https://YOUR-CALL-SERVER.onrender.com";
 const LK = window.LivekitClient;
-const CALLS_ON = !CALL_API.includes("YOUR-");   // call buttons stay hidden until the call server address above is filled in
+const SERVER_ON = !CALL_API.includes("YOUR-");       // the Cove server address above is filled in: the AI message check can run
+const CALLS_ENABLED = false;                         // change to true only after LiveKit is set up on the server
+const CALLS_ON = SERVER_ON && CALLS_ENABLED;         // call buttons and voice channels stay hidden until then
 const roomOf = (...b) => b.join("/");
 const roomName = b => (b[0] === "chats" ? "dm_" + b[1] : `srv_${b[1]}_${b[3]}`);
 const fresh = p => { const t = p.ping?.toMillis?.(); return !t || Date.now() - t < 60000; };
@@ -436,7 +440,10 @@ async function createServer(name) {
 }
 
 async function joinServer(code) {
-  const id = code.trim().toLowerCase();
+  let id = code.trim();
+  try { id = new URL(id).searchParams.get("join") || id; } catch {}        // a whole link was pasted
+  id = id.toLowerCase();
+  try { const inv = await getDoc(doc(db, "invites", id)); if (inv.exists()) id = inv.data().sid; } catch {}   // custom codes point at a server
   if (!/^[a-z0-9]{10}$/.test(id)) return null;
   let name;
   try { const ex = await getDoc(doc(db, "servers", id)); if (ex.exists()) name = ex.data().name; } catch {}   // already a member
@@ -481,7 +488,10 @@ function openServer(id, name) {
   const live = fn => d => { if (srv === s) fn(d); }, bad = err => console.error(err), col = (...p) => collection(db, "servers", id, ...p);
   s.u.push(
     onSnapshot(doc(db, "servers", id), live(d => {
-      if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner; migrate(s);
+      if (!d.exists()) closeServer(); else { s.name = d.data().name; s.owner = d.data().owner;
+        s.inviteCode = d.data().inviteCode || ""; s.moderation = d.data().moderation === true;
+        s.blockedWords = Array.isArray(d.data().blockedWords) ? d.data().blockedWords.filter(w => typeof w === "string").slice(0, 50) : [];
+        migrate(s);
         if (s.owner === me.uid && !myServers.find(x => x.id === id)?.owner) setDoc(doc(db, "users", me.uid, "servers", id), { owner: true }, { merge: true }).catch(() => {}); }
       render();
     }), err => {
@@ -549,6 +559,7 @@ async function deleteServerById(id, name) {
     await wipe(sub("channels"), 5); await wipe(sub("categories"), 5); await wipe(sub("roles"), 5);
     const others = (await getDocs(sub("members"))).docs.filter(d => d.id !== me.uid);
     for (let i = 0; i < others.length; i += 5) { const b = writeBatch(db); others.slice(i, i + 5).forEach(d => b.delete(d.ref)); await b.commit(); }
+    try { const sd = (await getDoc(doc(db, "servers", id))).data(); if (sd?.inviteCode) await deleteDoc(doc(db, "invites", sd.inviteCode)); } catch (e) { console.error(e); }
     await deleteDoc(doc(db, "servers", id, "members", me.uid));
     await deleteDoc(doc(db, "servers", id));
     await deleteDoc(doc(db, "users", me.uid, "servers", id)).catch(() => {});
@@ -574,7 +585,7 @@ function rowHtml(r) {
 
 function shell(key, html, bind) {
   if (shellFor === key) return;
-  replyDraft = null;
+  replyDraft = null; attachDraft = null;
   $("view").innerHTML = html; $("view").classList.toggle("chat", key.startsWith("chat:") || key.startsWith("srv:"));
   shellFor = key; bind();
 }
@@ -603,13 +614,97 @@ const placeAt = (el, x, y) => {
 const msgCol = () => chat ? collection(db, "chats", chat.id, "messages") : srv?.cid ? collection(db, "servers", srv.id, "channels", srv.cid, "messages") : null;
 const curMsgs = () => chat ? chatMsgs : srv?.msgs || [];
 const nameOfUid = uid => uid === me.uid ? me.username : chat ? chat.name : srv?.members.find(x => x.id === uid)?.name || "Someone";
-let replyDraft = null, pickTarget = null;
+let replyDraft = null, pickTarget = null, attachDraft = null;
 
 async function toggleReact(mid, e) {
   const col = msgCol(), m = curMsgs().find(x => x.id === mid); if (!col || !m) return;
   const mine = (m.reactions?.[e] || []).includes(me.uid);
   await updateDoc(doc(col, mid), new FieldPath("reactions", e), mine ? arrayRemove(me.uid) : arrayUnion(me.uid));
 }
+I.image = `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>`;
+
+async function attachFile(file, note) {
+  if (!CLOUD_ON) { note("Image uploads aren't set up yet."); return; }
+  const k0 = shellFor;
+  attachDraft = { busy: true }; renderAttachBar();
+  try { const url = await uploadImage(file); if (shellFor !== k0) return; attachDraft = { url }; }
+  catch (err) { console.error(err); if (shellFor === k0) { attachDraft = null; note(err.message || "The upload failed."); } }
+  renderAttachBar();
+}
+function renderAttachBar() {
+  const b = $("attachBar"); if (!b) return;
+  if (!attachDraft) { b.hidden = true; return; }
+  b.hidden = false;
+  b.innerHTML = attachDraft.busy ? `<span>Uploading image...</span>`
+    : `<img src="${esc(thumb(attachDraft.url, 80, 80))}" alt="Attached image"><span>Image ready to send</span><button class="ib" data-act="clearattach" aria-label="Remove image" title="Remove image">${I.x}</button>`;
+}
+
+/* ---------- moderation: a quick built-in filter, plus an AI check when the Cove server is set up ---------- */
+// <local-filter>
+const LEET = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s" };
+const flatten = t => t.toLowerCase().replace(/[013457@$]/g, c => LEET[c]).replace(/[^a-z\s]/g, "").replace(/(.)\1{2,}/g, "$1").replace(/\s+/g, " ").trim();
+const FILLER = "(?:(?:are|r|re|so|such|a|an|really|very|fucking|the|total|complete|absolute|just|actually|literally)\\s){0,4}";
+const BAD = [
+  [/\b(kill\s?your\s?self|kys|go\s?die|hope\s?you\s?die|end\s?yourself)\b/, "encouraging self-harm"],
+  [/\b(i\s?will|i\s?ll|im\s?gonna|im\s?going\s?to|gonna|going\s?to)\s(kill|hurt|stab|shoot|murder)\s(you|u|ur|your)\b/, "a threat"],
+  [new RegExp("\\b(you|u|ur|youre|your)\\s" + FILLER + "(idiot|moron|stupid|loser|worthless|pathetic|ugly|trash|dumb|retarded|disgusting|freak)\\b"), "an insult"],
+  [/\b(fuck|screw)\s(you|u|off)\b/, "an insult"],
+  [/\b(stfu|shut\s?the\s?fuck\s?up)\b/, "an insult"],
+  [/\bi\s?hate\s(you|u)\b/, "harassment"]
+];
+function localModerate(text, extra = []) {
+  const flat = flatten(text), spaced = flat.replace(/\b([a-z])\s(?=[a-z]\b)/g, "$1");    // "k y s" becomes "kys"
+  for (const [re, why] of BAD) for (const t of [flat, spaced]) {
+    const m = re.exec(t);
+    if (m && !/\b(not|never|dont|isnt|arent|wasnt)\b/.test(m[0])) return why;
+  }
+  for (const w of extra) { const nw = flatten(String(w)); if (nw && (" " + flat + " ").includes(" " + nw + " ")) return "a word this server blocks"; }
+  return null;
+}
+// </local-filter>
+async function aiModerate(text) {
+  try {
+    const r = await fetch(CALL_API + "/moderate", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, idToken: await auth.currentUser.getIdToken() }), signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;                              // if the AI can't be reached, the message goes through
+    const j = await r.json();
+    return j.ok ? null : (j.reason || "unfriendly");
+  } catch { return null; }
+}
+async function modGuard(text) {
+  if (!srv?.moderation) return null;
+  const local = localModerate(text, srv.blockedWords || []);
+  if (local) return `that looks like ${local}`;
+  if (!SERVER_ON) return null;
+  const ai = await aiModerate(text);
+  return ai ? `it looks unfriendly (${ai})` : null;
+}
+async function saveModeration() {
+  const words = [...new Set($("modWords").value.split("\n").map(w => w.trim().toLowerCase()).filter(w => w && w.length <= 30))].slice(0, 50);
+  await updateDoc(doc(db, "servers", srv.id), { moderation: $("modOn").checked, blockedWords: words });
+}
+
+/* ---------- invite links ---------- */
+const inviteLink = code => `${location.origin}${location.pathname}?join=${encodeURIComponent(code)}`;
+async function saveInvite(raw) {
+  const code = raw.trim().toLowerCase(), old = srv.inviteCode || "";
+  if (code && !/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(code)) throw new Error("Use 3 to 32 letters, numbers, or hyphens, and don't start or end with a hyphen.");
+  if (/^[a-z0-9]{10}$/.test(code)) throw new Error("Pick another code. Exactly 10 plain letters or numbers is reserved.");
+  if (code === old) return;
+  const b = writeBatch(db);
+  if (code) b.set(doc(db, "invites", code), { sid: srv.id });
+  if (old) b.delete(doc(db, "invites", old));
+  b.update(doc(db, "servers", srv.id), { inviteCode: code });
+  try { await b.commit(); } catch (err) { console.error(err); throw new Error("That code is already taken, or couldn't be saved. Try another."); }
+}
+function joinFromLink() {
+  const code = new URLSearchParams(location.search).get("join"); if (!code) return;
+  history.replaceState(null, "", location.pathname);
+  if (!confirm("Join the server from this invite link?")) return;
+  joinServer(code).then(j => { if (j) openServer(j.id, j.name); else alert("That invite link doesn't work. It may have changed, or the server was deleted."); })
+    .catch(err => { console.error(err); alert("Couldn't join from that link."); });
+}
+
 function renderReplyBar() {
   const b = $("replyBar"); if (!b) return;
   if (!replyDraft) { b.hidden = true; return; }
@@ -617,7 +712,7 @@ function renderReplyBar() {
   b.innerHTML = `${I.reply}<span>Replying to <b>${esc(replyDraft.name)}</b></span><span class="rt">${esc(replyDraft.text)}</span><button class="ib" data-act="cancelreply" aria-label="Cancel reply" title="Cancel reply">${I.x}</button>`;
 }
 function setReply(m) {
-  replyDraft = { id: m.id, from: m.from || "", name: nameOfUid(m.from), text: String(m.text || "").slice(0, 100) };
+  replyDraft = { id: m.id, from: m.from || "", name: nameOfUid(m.from), text: String(m.text || (m.image ? "Image" : "")).slice(0, 100) };
   renderReplyBar(); $("msgIn")?.focus();
 }
 function openPicker(mid, rect) {
@@ -658,22 +753,41 @@ function fillMsgs(list, who, emptyText, colorOf) {
     const n = who(m), c = colorOf?.(m), u = esc(m.from || ""), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
     const rp = m.replyTo && typeof m.replyTo === "object"
       ? `<div class="mreply" data-act="jumpmsg" data-id="${esc(m.replyTo.id || "")}">${I.reply}<b>${esc(m.replyTo.name || "Someone")}</b><span class="rt">${esc(m.replyTo.text || "")}</span></div>` : "";
-    return `<div class="m" data-mid="${esc(m.id || "")}"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div class="mbody">${rp}<b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small><p>${esc(m.text)}</p>${rxChips(m)}</div>${m.id ? mTools(m) : ""}</div>`;
+    return `<div class="m" data-mid="${esc(m.id || "")}"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div class="mbody">${rp}<b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small>${m.text ? `<p>${esc(m.text)}</p>` : ""}${okImg(m.image) ? `<a class="mimg" href="${esc(m.image)}" target="_blank" rel="noopener noreferrer"><img class="mimgi" src="${esc(limitw(m.image, 800))}" alt="Image from ${esc(n)}" loading="lazy"></a>` : ""}${rxChips(m)}</div>${m.id ? mTools(m) : ""}</div>`;
   }).join("") : `<div class="empty">${esc(emptyText)}</div>`;
   if (near) el.scrollTop = el.scrollHeight;
+  el.querySelectorAll("img.mimgi").forEach(im => { if (!im.complete) im.addEventListener("load", () => { if (near) el.scrollTop = el.scrollHeight; }); });
 }
 
-const msgPane = ph => `<div id="msgs" aria-live="polite"></div><div class="replybar" id="replyBar" hidden></div><form class="send" id="sendForm"><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form>`;
-const bindSend = (col, extra = () => ({})) => () => {
+const msgPane = ph => `<div id="msgs" aria-live="polite"></div><div class="replybar" id="replyBar" hidden></div><div class="attachbar" id="attachBar" hidden></div><form class="send" id="sendForm"><button type="button" class="ib attach" data-act="attach" aria-label="Attach an image" title="Attach an image">${I.image}</button><input type="file" id="fMsg" accept="image/png,image/jpeg,image/gif,image/webp" hidden><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form><div class="sendnote" id="sendNote" role="status" hidden></div>`;
+const bindSend = (col, extra = () => ({}), guard) => () => {
+  const note = (t, ms = 6000) => {
+    const n = $("sendNote"); if (!n) return;
+    n.textContent = t; n.hidden = !t; clearTimeout(n._t);
+    if (t && ms) n._t = setTimeout(() => { n.hidden = true; }, ms);
+  };
   $("sendForm").onsubmit = async e => {
     e.preventDefault();
-    const i = $("msgIn"), text = i.value.trim(); if (!text) return;
-    const rd = replyDraft;
-    i.value = ""; replyDraft = null; renderReplyBar();
-    try { await addDoc(col(), { from: me.uid, text, ...extra(), ...(rd ? { replyTo: rd } : {}), createdAt: serverTimestamp() }); }
-    catch (err) { i.value = text; replyDraft = rd; renderReplyBar(); console.error(err); }
+    const i = $("msgIn"), text = i.value.trim();
+    if (attachDraft?.busy) { note("Wait for the image to finish uploading."); return; }
+    if (!text && !attachDraft?.url) return;
+    if (guard && text) {
+      note("Checking your message...", 0);
+      const why = await guard(text);
+      if (why) { note(`Not sent: ${why}. Try rewording it.`); return; }
+      note("");
+    }
+    const rd = replyDraft, ad = attachDraft;
+    i.value = ""; replyDraft = null; attachDraft = null; renderReplyBar(); renderAttachBar();
+    try { await addDoc(col(), { from: me.uid, text, ...extra(), ...(rd ? { replyTo: rd } : {}), ...(ad?.url ? { image: ad.url } : {}), createdAt: serverTimestamp() }); }
+    catch (err) { i.value = text; replyDraft = rd; attachDraft = ad; renderReplyBar(); renderAttachBar(); console.error(err); }
   };
-  renderReplyBar();
+  $("fMsg").onchange = e => { const f = e.target.files?.[0]; e.target.value = ""; if (f) attachFile(f, note); };
+  $("msgIn").addEventListener("paste", e => {
+    const f = [...(e.clipboardData?.files || [])].find(x => x.type.startsWith("image/"));
+    if (f) { e.preventDefault(); attachFile(f, note); }
+  });
+  renderReplyBar(); renderAttachBar();
   $("msgIn").focus();
 };
 
@@ -707,7 +821,7 @@ function renderServer() {
   $("top").innerHTML = `<h1>${ch ? "# " + esc(ch.name) : esc(srv.name)}</h1>`;
   if (!ch) { shell("srv:none", `<div class="empty">No text channels yet.</div>`, () => {}); return; }
   shell("srv:" + srv.id + ":" + ch.id, msgPane("Message #" + ch.name),
-    bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username })));
+    bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username }), modGuard));
   const inp = $("msgIn"), ok = can("sendMessages") && canSend(ch);
   if (inp) { inp.disabled = !ok; inp.placeholder = ok ? "Message #" + ch.name : canSend(ch) ? "You don't have permission to send messages." : "This channel is locked. Only staff can send messages here."; }
   fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`, m => roleColor(srv.members.find(x => x.id === m.from)), m => m.from === me.uid || can("manageMessages"));
@@ -765,6 +879,22 @@ function refreshSettings(force) {
       + srv.roles.map(r => `<div class="rrow"><span class="shield">${shield(r.color)}</span><b>${esc(r.name)}</b><span class="cnt">${count(r)} ${I.people}</span>`
         + (canRoles ? btn("editrole", r.id, "Edit role", I.pencil) + (r.id === "everyone" ? "" : btn("delrole", r.id, "Delete role", I.trash)) : "") + `</div>`).join("")
       + `</div>` + (canRoles ? `<button class="primary" data-act="newrole">Create role</button>` : "");
+    return;
+  }
+  if (setTab === "invite") {
+    const owner = srv.owner === me.uid, code = srv.inviteCode || srv.id, base = `${location.host}${location.pathname}?join=`;
+    body.innerHTML = `<div class="fld">Invite link<div class="upl"><input id="invLink" readonly value="${esc(inviteLink(code))}" aria-label="Invite link"><button class="primary sm" data-act="copyinvite">Copy</button></div></div>`
+      + (owner ? `<form id="invForm" class="fld">Custom invite code<div class="upl"><span class="hint2">${esc(base)}</span><input id="invCode" maxlength="32" value="${esc(srv.inviteCode || "")}" placeholder="my-server" autocomplete="off"><button class="primary sm" type="submit">Save</button></div>
+          <span class="hint2">3 to 32 letters, numbers, or hyphens. Old links stop working when you change it.</span>${srv.inviteCode ? `<button type="button" class="link" data-act="resetinvite">Go back to a random code</button>` : ""}</form>`
+        : `<span class="hint2">Only the server owner can change the invite link.</span>`);
+    return;
+  }
+  if (setTab === "moderation") {
+    const owner = srv.owner === me.uid;
+    body.innerHTML = `<form id="modForm" class="pform" style="padding:0">
+      <label class="chk"><input type="checkbox" id="modOn" ${srv.moderation ? "checked" : ""} ${owner ? "" : "disabled"}><span><b>Block unfriendly messages</b><small>Messages in this server are checked before they send. ${SERVER_ON ? "The AI check is on." : "Only the built-in filter is on, because the Cove server isn't set up for the AI check yet."}</small></span></label>
+      <label class="fld">Extra blocked words, one per line<textarea id="modWords" rows="5" maxlength="1500" ${owner ? "" : "disabled"}>${esc((srv.blockedWords || []).join("\n"))}</textarea></label>
+      ${owner ? `<button class="primary" type="submit">Save</button>` : `<span class="hint2">Only the server owner can change moderation.</span>`}</form>`;
     return;
   }
   body.innerHTML = `<div class="mlist">` + srv.members.map(m => {
@@ -1091,6 +1221,13 @@ document.addEventListener("click", e => {
   else if (act === "clearavatar") { profDraft.avatarUrl = ""; paintProfPreview(); }
   else if (act === "clearbannerimg") { profDraft.bannerUrl = ""; paintProfPreview(); }
   else if (act === "closeprof") $("profModal").hidden = true;
+  else if (act === "attach") $("fMsg")?.click();
+  else if (act === "clearattach") { attachDraft = null; renderAttachBar(); }
+  else if (act === "copyinvite" && srv) {
+    const link = inviteLink(srv.inviteCode || srv.id);
+    (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => { $("setMsg").textContent = "Link copied."; }).catch(() => prompt("Copy this link:", link));
+  }
+  else if (act === "resetinvite" && srv) saveInvite("").then(() => { $("setMsg").textContent = "Back to a random code."; refreshSettings(true); }).catch(err => { $("setMsg").textContent = err.message; });
   else if (act === "editchan" && srv) openEdit("chan", id);
   else if (act === "editcat" && srv) openEdit("cat", id);
   else if (act === "delchan" && srv) deleteChannel(id).catch(err => { console.error(err); alert("Couldn't delete that channel."); });
@@ -1129,7 +1266,7 @@ document.addEventListener("click", e => {
   else if (act === "closech") $("chModal").hidden = true;
   else if (act === "newserver") { $("modalMsg").textContent = ""; $("modal").hidden = false; $("srvNameIn").focus(); }
   else if (act === "closemodal") $("modal").hidden = true;
-  else if (act === "invite" && srv) prompt("Invite code. Copy it and send it to your friends:", srv.id);
+  else if (act === "invite" && srv) prompt("Invite link. Copy it and send it to your friends:", inviteLink(srv.inviteCode || srv.id));
   else if ((act === "newchannel" || act === "ctxcat") && srv) {
     $("chMsg").textContent = "";
     $("chCat").innerHTML = `<option value="">No category</option>` + sorted(srv.cats).map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join("");
@@ -1218,6 +1355,14 @@ $("setBody").addEventListener("change", e => {
     const m = srv.members.find(x => x.id === b.value);
     if (m) setMemberRoles(m.id, [...(m.roles || []), b.dataset.rid]).then(() => refreshSettings(true)).catch(err => { console.error(err); $("setMsg").textContent = "Couldn't give that role."; });
   }
+});
+$("setBody").addEventListener("submit", async e => {
+  e.preventDefault(); if (!srv) return;
+  const say = t => { $("setMsg").textContent = t; };
+  try {
+    if (e.target.id === "invForm") { await saveInvite($("invCode").value); say("Invite link saved."); refreshSettings(true); }
+    if (e.target.id === "modForm") { await saveModeration(); say("Moderation settings saved."); }
+  } catch (err) { console.error(err); say(err.message || "Couldn't save that."); }
 });
 $("setBody").addEventListener("input", e => {         // keeps the role being edited safe while you switch tabs
   const el = e.target;
