@@ -364,3 +364,10 @@ html{overflow:hidden}
 .mimg img{display:block;max-width:min(100%,420px);max-height:320px;border-radius:8px;background:var(--panel)}
 #setBody .upl input{flex:1;min-width:0;padding:9px 12px;font:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text)}
 #setBody textarea{padding:9px 12px;font:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);resize:vertical}
+
+/* ---- unread badges, notification bar ---- */
+.srv{position:relative}
+.badge{position:absolute;right:-5px;bottom:-5px;display:grid;place-items:center;min-width:22px;height:22px;padding:0 5px;border:3px solid var(--rail);border-radius:11px;background:var(--dnd);color:#fff;font-size:12px;font-weight:700;line-height:1}
+.badge.sm{position:static;flex:none;min-width:20px;height:20px;margin-left:auto;border:0;font-size:11px}
+.notifbar{display:flex;align-items:center;gap:8px;margin:0 8px 8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--raised);color:var(--muted);font-size:12px}
+.notifbar span{flex:1}
