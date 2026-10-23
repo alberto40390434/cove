@@ -25,7 +25,7 @@
 
 <div class="app" id="app" hidden>
   <nav class="rail" aria-label="Servers">
-    <button class="srv home on" data-act="home" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg></button>
+    <button class="srv home on" data-act="home" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg><span class="badge" id="homeBadge" hidden></span></button>
     <div class="sep"></div>
     <div id="servers"></div>
     <button class="srv add" data-act="newserver" aria-label="Create or join a server">+</button>
@@ -35,7 +35,7 @@
     <div class="sidepane" id="homeSide">
     <button class="find" data-tab="add">Find or start a conversation</button>
     <div class="nav"><button class="navbtn on" data-act="home"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.8.7 3 2.4 3.5 5.2"/></svg>Friends</button></div>
-    <div class="dmhead">Direct messages</div>
+    <div class="dmhead">Direct messages <button class="ib" data-act="newgroup" aria-label="Create a group chat" title="Create a group chat" style="width:24px;height:24px">+</button></div>
     <div class="dmlist" id="dms"></div>
     </div>
     <div class="sidepane" id="srvSide" hidden>
@@ -46,6 +46,7 @@
       <div class="dmhead">Channels <button class="ib" id="addCh" data-act="newchannel" aria-label="Add channel" title="Add channel" style="width:24px;height:24px">+</button></div>
       <div class="dmlist" id="chList"></div>
     </div>
+    <div class="notifbar" id="notifBar" hidden><span>Get notified about new messages, even when Cove is in the background.</span><button class="primary sm" data-act="enablenotifs">Turn on</button><button class="ib" data-act="dismissnotifs" aria-label="Not now" title="Not now"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <div class="callbar" id="callBar" hidden>
       <div class="callinfo" data-act="callview" role="button" tabindex="0" title="Open call"><b id="callLabel"></b><small id="callState">Connecting...</small></div>
       <button class="ib" data-act="leavecall" aria-label="Leave call" title="Leave call"><svg viewBox="0 0 24 24"><path d="M4 15c4-4 12-4 16 0l-2 3-3-1.5v-2.5a9 9 0 0 0-6 0v2.5L6 18z"/></svg></button>
@@ -104,6 +105,10 @@
 <div class="ctxmenu" id="ctxMenu" role="menu" hidden>
   <button role="menuitem" data-act="ctxcat">Create category</button>
   <button role="menuitem" data-act="newchannel">Create channel</button>
+</div>
+
+<div class="auth" id="grpModal" hidden>
+  <div class="authbox"><div id="grpBody"></div></div>
 </div>
 
 <div class="auth" id="edModal" hidden>
