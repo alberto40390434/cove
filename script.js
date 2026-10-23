@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendEmailVerification }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
-  onSnapshot, addDoc, serverTimestamp, writeBatch, getDocs, FieldPath, arrayUnion, arrayRemove }
+  onSnapshot, addDoc, serverTimestamp, writeBatch, getDocs, FieldPath, arrayUnion, arrayRemove, increment }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { getDatabase, ref as dbRef, set, onValue, onDisconnect, serverTimestamp as rtStamp }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
@@ -60,6 +60,7 @@ const I = {
 /* ---------- state ---------- */
 let me = null, rels = [], profiles = {}, watchers = {}, unsubs = [], timers = [];
 let presence = {}, myStatus = "online", connUnsub = null;
+let convos = [], convoReady = false, seenUnread = {}, audioCtx = null;
 let tab = "online", q = "", chat = null, chatMsgs = [], chatUnsub = null, shellFor = null;
 let myServers = [], srv = null;
 
@@ -117,6 +118,7 @@ function stop() {
   timers.forEach(clearInterval);
   unsubs = []; watchers = {}; timers = []; chatUnsub = null;
   rels = []; profiles = {}; presence = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
+  convos = []; convoReady = false; seenUnread = {}; document.title = "Cove";
 }
 
 onAuthStateChanged(auth, async u => {
@@ -143,7 +145,7 @@ onAuthStateChanged(auth, async u => {
   $("auth").hidden = true; $("app").hidden = false;
   $("meName").textContent = me.username;
 
-  startPresence(); warmCalls(); joinFromLink();
+  startPresence(); warmCalls(); joinFromLink(); watchConvos(); updateNotifBar();
 
   unsubs.push(onSnapshot(query(collection(db, "friendships"), where("users", "array-contains", me.uid)), s => {
     rels = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -213,14 +215,18 @@ async function sendRequest(name) {
 }
 
 /* ---------- chat ---------- */
-function openChat(r) {
+function openConvo(c) {
   closeServer(); chatUnsub?.();
-  chat = { id: r.id, uid: other(r), name: nameOf(r) }; chatMsgs = [];
-  const u1 = onSnapshot(query(collection(db, "chats", r.id, "messages"), orderBy("createdAt"), limit(200)),
+  chat = { id: c.id, type: c.type, uid: c.uid, name: c.name, members: c.members || [], names: c.names || {}, createdBy: c.createdBy };
+  chatMsgs = [];
+  const u1 = onSnapshot(query(collection(db, "chats", c.id, "messages"), orderBy("createdAt"), limit(200)),
     s => { chatMsgs = s.docs.map(d => ({ id: d.id, ...d.data() })); if (chat) render(); }, err => console.error(err));
-  const u2 = onSnapshot(collection(db, "chats", r.id, "participants"),
-    s => { if (chat?.id === r.id) { chat.parts = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); } }, err => console.error(err));
+  const u2 = CALLS_ON && c.type === "dm"
+    ? onSnapshot(collection(db, "chats", c.id, "participants"),
+        s => { if (chat?.id === c.id) { chat.parts = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); } }, err => console.error(err))
+    : () => {};
   chatUnsub = () => { u1(); u2(); };
+  markRead(c.id);
   render();
 }
 function closeChat() { chatUnsub?.(); chatUnsub = null; chat = null; chatMsgs = []; }
@@ -613,7 +619,7 @@ const placeAt = (el, x, y) => {
 // the messages on screen belong to either an open friend chat or an open server channel
 const msgCol = () => chat ? collection(db, "chats", chat.id, "messages") : srv?.cid ? collection(db, "servers", srv.id, "channels", srv.cid, "messages") : null;
 const curMsgs = () => chat ? chatMsgs : srv?.msgs || [];
-const nameOfUid = uid => uid === me.uid ? me.username : chat ? chat.name : srv?.members.find(x => x.id === uid)?.name || "Someone";
+const nameOfUid = uid => uid === me.uid ? me.username : chat ? (chat.type === "group" ? chat.names?.[uid] || "Someone" : chat.name) : srv?.members.find(x => x.id === uid)?.name || "Someone";
 let replyDraft = null, pickTarget = null, attachDraft = null;
 
 async function toggleReact(mid, e) {
@@ -682,6 +688,162 @@ async function modGuard(text) {
 async function saveModeration() {
   const words = [...new Set($("modWords").value.split("\n").map(w => w.trim().toLowerCase()).filter(w => w && w.length <= 30))].slice(0, 50);
   await updateDoc(doc(db, "servers", srv.id), { moderation: $("modOn").checked, blockedWords: words });
+}
+
+/* ---------- conversations: friend chats, chats with people you haven't added, and groups ---------- */
+function chatFromMeta(m) {
+  const uid = m.type === "dm" ? (m.members || []).find(u => u !== me.uid) : undefined, names = m.names || {};
+  const name = m.type === "dm" ? (names[uid] || "Someone")
+    : (m.title || Object.entries(names).filter(([u]) => u !== me.uid).map(([, n]) => n).slice(0, 3).join(", ") || "Group chat");
+  return { id: m.id, type: m.type, uid, name, members: m.members || [], names, createdBy: m.createdBy };
+}
+function dmEntries() {
+  const list = convos.map(c => {
+    const e = chatFromMeta(c), ts = c.lastAt;
+    e.unread = c.unread?.[me.uid] || 0; e.at = ts?.toMillis ? ts.toMillis() : ts === null ? Date.now() : 0;
+    return e;
+  });
+  const have = new Set(list.map(x => x.id));
+  accepted().filter(r => !have.has(r.id)).forEach(r => list.push({ id: r.id, type: "dm", uid: other(r), name: nameOf(r), members: r.users, names: r.names, unread: 0, at: 0 }));
+  return list.sort((a, b) => b.at - a.at || a.name.localeCompare(b.name));
+}
+const dmRow = e => `<button class="dm ${chat?.id === e.id ? "on" : ""}" data-act="chat" data-id="${e.id}">${e.type === "group" ? av(e.name, "nodot") : av(e.name, dotCls(e.uid))}<span>${esc(e.name)}${e.type === "group" ? `<small>${e.members.length} members</small>` : ""}</span>${e.unread ? `<span class="badge sm">${e.unread > 99 ? "99+" : e.unread}</span>` : ""}</button>`;
+function chatHeader() {
+  if (chat.type === "group") return `<h1 class="plink" data-act="groupinfo" title="Group details">${av(chat.name, "nodot")}${esc(chat.name)} <span class="hint2">${chat.members.length} members</span></h1>`;
+  return `<h1 class="plink" data-act="profile" data-uid="${chat.uid}">${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>${dmCallBtn()}`;
+}
+function openConvoById(id) {
+  const c = convos.find(x => x.id === id);
+  if (c) return openConvo(chatFromMeta(c));
+  const r = rels.find(x => x.id === id);
+  if (r) startDm(other(r)).catch(err => { console.error(err); alert("Couldn't start that chat."); });
+}
+async function startDm(uid) {                              // works for friends and for people you only share a server with
+  if (!uid || uid === me.uid) return;
+  const members = [me.uid, uid].sort(), id = members.join("_");
+  const known = convos.find(x => x.id === id);
+  if (known) return openConvo(chatFromMeta(known));
+  let uname = profiles[uid]?.username;
+  if (!uname) { try { uname = (await getDoc(doc(db, "users", uid))).data()?.username; } catch (e) { console.error(e); } }
+  if (!uname) { alert("Couldn't find that person."); return; }
+  const ref = doc(db, "chats", id), names = { [me.uid]: me.username, [uid]: uname };
+  const ex = await getDoc(ref);
+  if (!ex.exists()) await setDoc(ref, { type: "dm", members, names, createdBy: me.uid, createdAt: serverTimestamp(), lastAt: serverTimestamp(), lastFrom: "", lastText: "", unread: {} });
+  openConvo({ id, type: "dm", uid, name: uname, members, names, createdBy: ex.exists() ? ex.data().createdBy : me.uid });
+}
+async function sentInChat(c, text, img) {                  // remembers the last message and adds 1 to everyone else's unread count
+  const data = { lastAt: serverTimestamp(), lastFrom: me.uid, lastText: (text || (img ? "Sent an image" : "")).slice(0, 100) };
+  c.members.filter(u => u !== me.uid).forEach(u => { data[`unread.${u}`] = increment(1); });
+  try { await updateDoc(doc(db, "chats", c.id), data); } catch (err) { console.error(err); }
+}
+
+/* ---------- unread counts and notifications ---------- */
+const totalUnread = () => convos.reduce((n, c) => n + (c.unread?.[me.uid] || 0), 0);
+function setBadges() {
+  const t = totalUnread(), hb = $("homeBadge"), txt = t > 99 ? "99+" : String(t);
+  if (hb) { hb.hidden = !t; hb.textContent = txt; }
+  document.title = t ? `(${txt}) Cove` : "Cove";
+}
+function markRead(id) {                                    // only when you can actually see the window
+  if (!id || document.visibilityState !== "visible" || !document.hasFocus()) return;
+  const c = convos.find(x => x.id === id);
+  if (c && (c.unread?.[me.uid] || 0) > 0) updateDoc(doc(db, "chats", id), new FieldPath("unread", me.uid), 0).catch(() => {});
+}
+function ping() {
+  try {
+    if (!audioCtx) return;
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime;
+    o.type = "sine"; o.frequency.value = 880; g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.25);
+  } catch {}
+}
+function notifyMessage(c) {
+  const visible = document.visibilityState === "visible", focused = visible && document.hasFocus();
+  if (chat?.id === c.id && focused) return;                // you're reading it
+  if (myStatus === "dnd") return;                          // Do Not Disturb: badges only, no pop-ups or sounds
+  const who = c.names?.[c.lastFrom] || "Someone", title = c.type === "group" ? (c.title || "Group chat") : who;
+  const body = (c.type === "group" ? who + ": " : "") + (c.lastText || "Sent a message");
+  if (!focused && "Notification" in window && Notification.permission === "granted") {
+    try { const n = new Notification(title, { body, tag: c.id }); n.onclick = () => { window.focus(); n.close(); openConvoById(c.id); }; }
+    catch (e) { console.error(e); }
+  }
+  ping();
+}
+function watchConvos() {
+  unsubs.push(onSnapshot(query(collection(db, "chats"), where("members", "array-contains", me.uid)), s => {
+    convos = s.docs.map(d => ({ id: d.id, ...d.data() }));
+    convos.forEach(c => { if (c.type === "dm") { const o = (c.members || []).find(u => u !== me.uid); if (o) watch(o); } });
+    s.docChanges().forEach(ch => {
+      const c = { id: ch.doc.id, ...ch.doc.data() }, mine = c.unread?.[me.uid] || 0, prev = seenUnread[c.id] || 0;
+      seenUnread[c.id] = mine;
+      if (ch.type !== "removed" && convoReady && mine > prev && c.lastFrom && c.lastFrom !== me.uid) notifyMessage(c);
+    });
+    convoReady = true;
+    if (chat) {
+      const cur = convos.find(x => x.id === chat.id);
+      if (cur) Object.assign(chat, chatFromMeta(cur));
+      else if (chat.type === "group") { closeChat(); shellFor = null; }
+      if (chat) markRead(chat.id);
+    }
+    render();
+  }, err => console.error(err)));
+}
+function updateNotifBar() {
+  const b = $("notifBar"); if (!b) return;
+  let off = false; try { off = localStorage.getItem("cove_notif_off") === "1"; } catch {}
+  b.hidden = !("Notification" in window) || Notification.permission !== "default" || off;
+}
+document.addEventListener("click", () => { try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); } catch {} }, { once: true });
+document.addEventListener("visibilitychange", () => { if (me && chat) markRead(chat.id); });
+addEventListener("focus", () => { if (me && chat) markRead(chat.id); });
+
+/* ---------- group chats (friends only) ---------- */
+const friendPicks = skip => accepted().map(r => ({ uid: other(r), name: nameOf(r) })).filter(f => !skip.includes(f.uid))
+  .map(f => `<label><input type="checkbox" data-u="${f.uid}" data-n="${esc(f.name)}"><span>${av(f.name, "nodot")} ${esc(f.name)}</span></label>`).join("");
+const picked = () => [...document.querySelectorAll("#gPick input:checked")].map(b => ({ uid: b.dataset.u, name: b.dataset.n }));
+function openGroupCreate() {
+  const list = friendPicks([me.uid]);
+  $("grpBody").innerHTML = `<div class="pform"><h2>Create a group chat</h2>
+    <label class="fld">Group name (optional)<input id="gName" maxlength="40" autocomplete="off"></label>
+    <div class="fld">Pick 2 or more friends<div class="perms col" id="gPick">${list || "<small>Add some friends first. Only friends can be put in a group.</small>"}</div></div>
+    <div class="row-actions"><button class="primary" data-act="mkgroup">Create group</button><button class="link" data-act="closegrp">Cancel</button></div><div class="msg" id="gMsg" role="status"></div></div>`;
+  $("grpModal").hidden = false;
+}
+async function mkGroup() {
+  const say = t => { $("gMsg").textContent = t; }, picks = picked();
+  if (picks.length < 2) return say("Pick at least 2 friends.");
+  if (picks.length > 9) return say("A group can have up to 10 people, including you.");
+  const names = { [me.uid]: me.username }; picks.forEach(p => { names[p.uid] = p.name; });
+  const title = $("gName").value.trim() || picks.slice(0, 3).map(p => p.name).join(", "), id = randId(), members = [me.uid, ...picks.map(p => p.uid)];
+  try { await setDoc(doc(db, "chats", id), { type: "group", title, members, names, createdBy: me.uid, createdAt: serverTimestamp(), lastAt: serverTimestamp(), lastFrom: "", lastText: "", unread: {} }); }
+  catch (err) { console.error(err); return say("Couldn't create the group."); }
+  $("grpModal").hidden = true;
+  openConvo({ id, type: "group", name: title, members, names, createdBy: me.uid });
+}
+function openGroupInfo() {
+  if (!chat || chat.type !== "group") return;
+  const room = 10 - chat.members.length, list = room > 0 ? friendPicks(chat.members) : "";
+  $("grpBody").innerHTML = `<div class="pform"><h2>Group chat</h2>
+    <label class="fld">Name<input id="gName" maxlength="40" value="${esc(chat.name)}" autocomplete="off"></label>
+    <div class="fld">Members (${chat.members.length})<div class="mlist" style="max-height:30vh">${chat.members.map(u => `<div class="mrow2"><div class="mtop plink" data-act="profile" data-uid="${u}">${av(nameOfUid(u), "nodot")}<b>${esc(nameOfUid(u))}${u === chat.createdBy ? " (creator)" : ""}</b></div></div>`).join("")}</div></div>
+    ${list ? `<div class="fld">Add friends<div class="perms col" id="gPick">${list}</div></div>` : ""}
+    <div class="row-actions"><button class="primary" data-act="savegroup">Save</button><button class="danger" data-act="leavegroup">Leave group</button><button class="link" data-act="closegrp">Close</button></div><div class="msg" id="gMsg" role="status"></div></div>`;
+  $("grpModal").hidden = false;
+}
+async function saveGroup() {
+  if (!chat || chat.type !== "group") return;
+  const say = t => { $("gMsg").textContent = t; }, picks = picked();
+  if (chat.members.length + picks.length > 10) return say("A group can have up to 10 people.");
+  const names = { ...chat.names }; picks.forEach(p => { names[p.uid] = p.name; });
+  try { await updateDoc(doc(db, "chats", chat.id), { title: $("gName").value.trim() || chat.name, names, members: [...chat.members, ...picks.map(p => p.uid)] }); }
+  catch (err) { console.error(err); return say("Couldn't save that."); }
+  $("grpModal").hidden = true;
+}
+async function leaveGroup() {
+  if (!chat || chat.type !== "group" || !confirm(`Leave ${chat.name}?`)) return;
+  const id = chat.id, rest = chat.members.filter(u => u !== me.uid);
+  try { await updateDoc(doc(db, "chats", id), { members: rest }); } catch (err) { console.error(err); alert("Couldn't leave the group."); return; }
+  $("grpModal").hidden = true; closeChat(); shellFor = null; render();
 }
 
 /* ---------- invite links ---------- */
@@ -760,7 +922,7 @@ function fillMsgs(list, who, emptyText, colorOf) {
 }
 
 const msgPane = ph => `<div id="msgs" aria-live="polite"></div><div class="replybar" id="replyBar" hidden></div><div class="attachbar" id="attachBar" hidden></div><form class="send" id="sendForm"><button type="button" class="ib attach" data-act="attach" aria-label="Attach an image" title="Attach an image">${I.image}</button><input type="file" id="fMsg" accept="image/png,image/jpeg,image/gif,image/webp" hidden><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form><div class="sendnote" id="sendNote" role="status" hidden></div>`;
-const bindSend = (col, extra = () => ({}), guard) => () => {
+const bindSend = (col, extra = () => ({}), guard, after) => () => {
   const note = (t, ms = 6000) => {
     const n = $("sendNote"); if (!n) return;
     n.textContent = t; n.hidden = !t; clearTimeout(n._t);
@@ -779,7 +941,7 @@ const bindSend = (col, extra = () => ({}), guard) => () => {
     }
     const rd = replyDraft, ad = attachDraft;
     i.value = ""; replyDraft = null; attachDraft = null; renderReplyBar(); renderAttachBar();
-    try { await addDoc(col(), { from: me.uid, text, ...extra(), ...(rd ? { replyTo: rd } : {}), ...(ad?.url ? { image: ad.url } : {}), createdAt: serverTimestamp() }); }
+    try { await addDoc(col(), { from: me.uid, text, ...extra(), ...(rd ? { replyTo: rd } : {}), ...(ad?.url ? { image: ad.url } : {}), createdAt: serverTimestamp() }); await after?.(text, ad?.url); }
     catch (err) { i.value = text; replyDraft = rd; attachDraft = ad; renderReplyBar(); renderAttachBar(); console.error(err); }
   };
   $("fMsg").onchange = e => { const f = e.target.files?.[0]; e.target.value = ""; if (f) attachFile(f, note); };
@@ -1000,7 +1162,7 @@ function renderProfile(uid, u, editing) {
     + `<h4>Member since</h4><p>${fmtDate(made)}</p>`
     + (mem?.joinedAt?.toDate ? `<h4>Joined ${esc(srv.name)}</h4><p>${fmtDate(mem.joinedAt.toDate())}</p>` : "")
     + (roles.length ? `<h4>Roles</h4><div class="chips">${roles.map(r => `<span class="chip" style="--c:${okHex(r.color) ? r.color : "#99aab5"}"><i></i>${esc(r.name)}</span>`).join("")}</div>` : "")
-    + `<div class="row-actions" style="margin-top:12px">${mine ? `<button class="primary" data-act="editprofile">Edit profile</button>` : ""}<button class="link" data-act="closeprof">Close</button></div></div>`;
+    + `<div class="row-actions" style="margin-top:12px">${mine ? `<button class="primary" data-act="editprofile">Edit profile</button>` : `<button class="primary" data-act="dmuser" data-uid="${uid}">Message</button>`}<button class="link" data-act="closeprof">Close</button></div></div>`;
 }
 
 /* ---------- channel order, privacy, editing ---------- */
@@ -1124,12 +1286,11 @@ async function saveEdit() {
 
 function render() {
   if (!me) return;
-  renderRail();
+  renderRail(); setBadges();
   if (srv) return renderServer();
   $("homeSide").hidden = false; $("srvSide").hidden = true; $("rightTitle").textContent = "Active now";
   const fr = accepted().sort((a, b) => (+isOnline(other(b))) - (+isOnline(other(a))) || nameOf(a).localeCompare(nameOf(b)));
-  $("dms").innerHTML = fr.map(r => `<button class="dm" data-act="chat" data-id="${r.id}">${av(nameOf(r), dotCls(other(r)))}<span>${esc(nameOf(r))}</span></button>`).join("")
-    || `<p class="hint">Add a friend to start a conversation.</p>`;
+  $("dms").innerHTML = dmEntries().map(dmRow).join("") || `<p class="hint">Add a friend to start a conversation.</p>`;
   const on = fr.filter(r => isOnline(other(r)));
   $("activeList").innerHTML = on.length
     ? on.map(r => `<div class="card plink" data-act="profile" data-uid="${other(r)}">${av(nameOf(r), dotCls(other(r)))}<div><b>${esc(nameOf(r))}</b><small>${labelOf(other(r))}</small></div></div>`).join("")
@@ -1137,14 +1298,15 @@ function render() {
 
   const incoming = rels.filter(r => r.status === "pending" && r.to === me.uid).length;
   $("top").innerHTML = chat
-    ? `<h1 class="plink" data-act="profile" data-uid="${chat.uid}">${av(chat.name, dotCls(chat.uid))}${esc(chat.name)}</h1>${dmCallBtn()}`
+    ? chatHeader()
     : `<h1>Friends</h1>` + [["online", "Online"], ["all", "All"], ["pending", "Pending" + (incoming ? ` (${incoming})` : "")]]
         .map(([k, l]) => `<button class="tab ${tab === k ? "on" : ""}" data-tab="${k}" role="tab">${l}</button>`).join("")
       + `<button class="tab cta" data-tab="add" role="tab">Add friend</button>`;
 
   if (chat) {
-    shell("chat:" + chat.id, msgPane("Message " + chat.name), bindSend(() => collection(db, "chats", chat.id, "messages")));
-    fillMsgs(chatMsgs, m => (m.from === me.uid ? me.username : chat.name), `This is the start of your chat with ${chat.name}. Say hi.`);
+    const c0 = chat;
+    shell("chat:" + chat.id, msgPane("Message " + chat.name), bindSend(() => collection(db, "chats", c0.id, "messages"), undefined, undefined, (text, img) => sentInChat(c0, text, img)));
+    fillMsgs(chatMsgs, m => nameOfUid(m.from), chat.type === "group" ? "This is the start of the group chat. Say hi." : `This is the start of your chat with ${chat.name}. Say hi.`);
   } else if (tab === "add") {
     shell("add",
       `<div class="addbox"><b>Add a friend</b><p>Enter their username to send a friend request.</p><form id="addForm" style="display:flex;gap:8px"><label class="search" style="flex:1"><input id="uname" placeholder="Username" aria-label="Username" autocomplete="off"></label><button class="primary" type="submit">Send request</button></form><div class="msg" id="addMsg" role="status"></div></div>`,
@@ -1215,12 +1377,21 @@ document.addEventListener("click", e => {
   }
   else if (act === "pickcolor") { if (roleDraft) roleDraft.color = t.dataset.color; $("rColor").value = t.dataset.color; document.querySelectorAll("#setBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
   else if (act === "pickbanner") { $("pColor").value = t.dataset.color; paintProfPreview(); document.querySelectorAll("#profBody .sw").forEach(b => b.classList.toggle("on", b === t)); }
-  else if (act === "profile") openProfile(t.dataset.uid);
+  else if (act === "profile") { $("grpModal").hidden = true; openProfile(t.dataset.uid); }
   else if (act === "pickavatar") $("fAv")?.click();
   else if (act === "pickbannerimg") $("fBn")?.click();
   else if (act === "clearavatar") { profDraft.avatarUrl = ""; paintProfPreview(); }
   else if (act === "clearbannerimg") { profDraft.bannerUrl = ""; paintProfPreview(); }
   else if (act === "closeprof") $("profModal").hidden = true;
+  else if (act === "dmuser") { $("profModal").hidden = true; startDm(t.dataset.uid).catch(err => { console.error(err); alert("Couldn't start that chat."); }); }
+  else if (act === "newgroup") openGroupCreate();
+  else if (act === "mkgroup") mkGroup();
+  else if (act === "groupinfo") openGroupInfo();
+  else if (act === "savegroup") saveGroup();
+  else if (act === "leavegroup") leaveGroup();
+  else if (act === "closegrp") $("grpModal").hidden = true;
+  else if (act === "enablenotifs") { if ("Notification" in window) Notification.requestPermission().then(updateNotifBar).catch(updateNotifBar); }
+  else if (act === "dismissnotifs") { try { localStorage.setItem("cove_notif_off", "1"); } catch {} updateNotifBar(); }
   else if (act === "attach") $("fMsg")?.click();
   else if (act === "clearattach") { attachDraft = null; renderAttachBar(); }
   else if (act === "copyinvite" && srv) {
@@ -1284,7 +1455,7 @@ document.addEventListener("click", e => {
     items.push(["sep"], srv.owner === me.uid ? ["delserver", "Delete Server", "", "red"] : ["leave", "Leave Server", "", "red"]);
     showCtx(items, rect0.left, rect0.bottom + 4);
   }
-  else if (act === "chat" && r) openChat(r);
+  else if (act === "chat") openConvoById(id);
   else if (act === "accept") updateDoc(ref, { status: "accepted" });
   else if (act === "decline" || act === "cancel") deleteDoc(ref);
   else if (act === "remove" && r && confirm(`Remove ${nameOf(r)} from your friends?`)) deleteDoc(ref);
