@@ -371,3 +371,14 @@ html{overflow:hidden}
 .badge.sm{position:static;flex:none;min-width:20px;height:20px;margin-left:auto;border:0;font-size:11px}
 .notifbar{display:flex;align-items:center;gap:8px;margin:0 8px 8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--raised);color:var(--muted);font-size:12px}
 .notifbar span{flex:1}
+
+/* ---- @mentions ---- */
+.send{position:relative}
+.mention{padding:0 3px;border-radius:4px;background:color-mix(in srgb, var(--accent) 22%, transparent);color:var(--accent);font-weight:600;cursor:pointer}
+.mention.me,.mention.all{background:color-mix(in srgb, var(--idle) 28%, transparent);color:var(--idle)}
+.m.mention{background:color-mix(in srgb, var(--idle) 9%, transparent);box-shadow:inset 3px 0 0 var(--idle)}
+.mpop{position:absolute;left:0;bottom:calc(100% + 6px);z-index:6;min-width:260px;max-height:240px;overflow-y:auto;padding:6px;border:1px solid var(--line);border-radius:10px;background:var(--raised);box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.mpop button{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:7px;text-align:left}
+.mpop button.on,.mpop button:hover{background:var(--panel)}
+.mpop small{color:var(--muted);font-size:12px}
+.mpop .av{width:24px;height:24px;font-size:11px}
