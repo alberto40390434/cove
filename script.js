@@ -61,6 +61,7 @@ const I = {
 let me = null, rels = [], profiles = {}, watchers = {}, unsubs = [], timers = [];
 let presence = {}, myStatus = "online", connUnsub = null;
 let convos = [], convoReady = false, seenUnread = {}, audioCtx = null;
+let pingU = {}, pingList = {}, pingReady = {}, seenAtMs = {}, mentionState = { items: [], idx: 0, start: 0 };
 let tab = "online", q = "", chat = null, chatMsgs = [], chatUnsub = null, shellFor = null;
 let myServers = [], srv = null;
 
@@ -119,6 +120,7 @@ function stop() {
   unsubs = []; watchers = {}; timers = []; chatUnsub = null;
   rels = []; profiles = {}; presence = {}; chat = null; chatMsgs = []; shellFor = null; tab = "online"; q = "";
   convos = []; convoReady = false; seenUnread = {}; document.title = "Cove";
+  Object.values(pingU).forEach(f => f()); pingU = {}; pingList = {}; pingReady = {}; seenAtMs = {};
 }
 
 onAuthStateChanged(auth, async u => {
@@ -154,7 +156,7 @@ onAuthStateChanged(auth, async u => {
     render();
   }, err => console.error(err)));
   unsubs.push(onSnapshot(collection(db, "users", me.uid, "servers"), s => {
-    myServers = s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => a.name.localeCompare(b.name)); render();
+    myServers = s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => a.name.localeCompare(b.name)); syncPingWatchers(); render();
   }, err => console.error(err)));
   render();
 });
@@ -240,14 +242,15 @@ const PERM_INFO = [
     ["kickMembers", "Kick Members", "Remove other members from the server. They can come back with the invite code."]]],
   ["Text channels", [
     ["sendMessages", "Send Messages", "Send messages in channels that aren't locked or private to them."],
-    ["manageMessages", "Manage Messages", "Delete messages sent by other members."]]],
+    ["manageMessages", "Manage Messages", "Delete messages sent by other members."],
+    ["mentionEveryone", "Mention @everyone", "Notify every member of the server by typing @everyone."]]],
   ["Voice channels", [
     ["connectVoice", "Connect", "Join voice channels and calls."]]],
   ["Advanced", [
     ["administrator", "Administrator", "Every permission, plus access to private and locked channels. This is a dangerous permission to grant."]]]
 ];
 const PERMS = PERM_INFO.flatMap(([, items]) => items.map(([k, l]) => [k, l]));
-const DEFAULT_PERMS = { sendMessages: true, connectVoice: true, manageChannels: false, manageRoles: false, kickMembers: false, manageMessages: false, administrator: false };
+const DEFAULT_PERMS = { sendMessages: true, connectVoice: true, manageChannels: false, manageRoles: false, kickMembers: false, manageMessages: false, mentionEveryone: false, administrator: false };
 const can = p => {
   if (!srv || !me) return false;
   if (srv.owner === me.uid) return true;
@@ -488,9 +491,9 @@ async function migrate(s) {
   } catch (e) { console.error(e); }
 }
 
-function openServer(id, name) {
+function openServer(id, name, want) {
   closeChat(); closeServer();
-  const s = srv = { id, name, owner: null, channels: [], cats: [], roles: [], members: [], cid: null, msgs: [], u: [], mu: null, vu: {}, vparts: {}, rl: false, ml: false };
+  const s = srv = { id, name, owner: null, channels: [], cats: [], roles: [], members: [], cid: null, msgs: [], u: [], mu: null, vu: {}, vparts: {}, rl: false, ml: false, want: want || null };
   const live = fn => d => { if (srv === s) fn(d); }, bad = err => console.error(err), col = (...p) => collection(db, "servers", id, ...p);
   s.u.push(
     onSnapshot(doc(db, "servers", id), live(d => {
@@ -562,7 +565,7 @@ async function deleteServerById(id, name) {
   try {
     const chans = await getDocs(sub("channels"));
     for (const c of chans.docs) await wipe(sub("channels", c.id, "messages"), 8);
-    await wipe(sub("channels"), 5); await wipe(sub("categories"), 5); await wipe(sub("roles"), 5);
+    await wipe(sub("channels"), 5); await wipe(sub("categories"), 5); await wipe(sub("roles"), 5); await wipe(sub("pings"), 5);
     const others = (await getDocs(sub("members"))).docs.filter(d => d.id !== me.uid);
     for (let i = 0; i < others.length; i += 5) { const b = writeBatch(db); others.slice(i, i + 5).forEach(d => b.delete(d.ref)); await b.commit(); }
     try { const sd = (await getDoc(doc(db, "servers", id))).data(); if (sd?.inviteCode) await deleteDoc(doc(db, "invites", sd.inviteCode)); } catch (e) { console.error(e); }
@@ -740,9 +743,9 @@ async function sentInChat(c, text, img) {                  // remembers the last
 /* ---------- unread counts and notifications ---------- */
 const totalUnread = () => convos.reduce((n, c) => n + (c.unread?.[me.uid] || 0), 0);
 function setBadges() {
-  const t = totalUnread(), hb = $("homeBadge"), txt = t > 99 ? "99+" : String(t);
-  if (hb) { hb.hidden = !t; hb.textContent = txt; }
-  document.title = t ? `(${txt}) Cove` : "Cove";
+  const dm = totalUnread(), t = dm + totalMentions(), hb = $("homeBadge");
+  if (hb) { hb.hidden = !dm; hb.textContent = dm > 99 ? "99+" : String(dm); }
+  document.title = t ? `(${t > 99 ? "99+" : t}) Cove` : "Cove";
 }
 function markRead(id) {                                    // only when you can actually see the window
   if (!id || document.visibilityState !== "visible" || !document.hasFocus()) return;
@@ -794,8 +797,8 @@ function updateNotifBar() {
   b.hidden = !("Notification" in window) || Notification.permission !== "default" || off;
 }
 document.addEventListener("click", () => { try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); } catch {} }, { once: true });
-document.addEventListener("visibilitychange", () => { if (me && chat) markRead(chat.id); });
-addEventListener("focus", () => { if (me && chat) markRead(chat.id); });
+document.addEventListener("visibilitychange", () => { if (me && chat) markRead(chat.id); if (me && srv) markServerSeen(srv.id); });
+addEventListener("focus", () => { if (me && chat) markRead(chat.id); if (me && srv) markServerSeen(srv.id); });
 
 /* ---------- group chats (friends only) ---------- */
 const friendPicks = skip => accepted().map(r => ({ uid: other(r), name: nameOf(r) })).filter(f => !skip.includes(f.uid))
@@ -844,6 +847,111 @@ async function leaveGroup() {
   const id = chat.id, rest = chat.members.filter(u => u !== me.uid);
   try { await updateDoc(doc(db, "chats", id), { members: rest }); } catch (err) { console.error(err); alert("Couldn't leave the group."); return; }
   $("grpModal").hidden = true; closeChat(); shellFor = null; render();
+}
+
+/* ---------- @mentions: @everyone and @name ---------- */
+const canAll = () => !!srv && !chat && can("mentionEveryone");
+const ctxPeople = () => chat ? (chat.type === "group" ? chat.members.map(u => ({ id: u, name: chat.names?.[u] || "" })).filter(p => p.name) : []) : srv ? srv.members.map(m => ({ id: m.id, name: m.name })) : [];
+const MENTION_RE = /(^|[^A-Za-z0-9_.])@([A-Za-z0-9_.]{2,20})/g;
+function parseMentions(text) {
+  const byName = new Map(ctxPeople().map(p => [p.name.toLowerCase(), p.id])), ids = new Set();
+  let all = false;
+  for (const m of text.matchAll(MENTION_RE)) {
+    const k = m[2].replace(/\.+$/, "").toLowerCase();
+    if (k === "everyone") { if (canAll()) all = true; }
+    else if (byName.has(k) && byName.get(k) !== me.uid) ids.add(byName.get(k));
+  }
+  return { ids: [...ids].slice(0, 20), all };
+}
+const mentionFields = text => { const p = parseMentions(text); return { ...(p.ids.length ? { mentions: p.ids } : {}), ...(p.all ? { mentionAll: true } : {}) }; };
+const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const isHot = m => m.from !== me.uid && !!(m.mentionAll || (m.mentions || []).includes(me.uid) || new RegExp("(^|[^A-Za-z0-9_.])@" + reEsc(me.username) + "(?![A-Za-z0-9_])", "i").test(m.text || ""));
+function mentionHtml(m) {                                  // message text with @names highlighted and clickable
+  const byName = new Map(ctxPeople().map(p => [p.name.toLowerCase(), p])), t = esc(m.text);
+  return t.replace(MENTION_RE, (all, pre, tok) => {
+    const clean = tok.replace(/\.+$/, ""), tail = tok.slice(clean.length), k = clean.toLowerCase();
+    if (k === "everyone") return m.mentionAll ? `${pre}<span class="mention all">@everyone</span>${tail}` : all;
+    const p = byName.get(k);
+    return p ? `${pre}<span class="mention ${p.id === me.uid ? "me" : ""}" data-act="profile" data-uid="${p.id}">@${esc(p.name)}</span>${tail}` : all;
+  });
+}
+function updateMentionPop() {
+  const inp = $("msgIn"), pop = $("mentionPop"); if (!inp || !pop) return;
+  const people = ctxPeople();
+  if (!people.length && !canAll()) { pop.hidden = true; return; }
+  const upto = inp.value.slice(0, inp.selectionStart), m = /(^|[^A-Za-z0-9_.])@([A-Za-z0-9_.]*)$/.exec(upto);
+  if (!m) { pop.hidden = true; return; }
+  const q = m[2].toLowerCase(), start = upto.length - m[2].length - 1;
+  const items = people.filter(p => p.id !== me.uid && p.name.toLowerCase().includes(q))
+    .sort((a, b) => (+b.name.toLowerCase().startsWith(q)) - (+a.name.toLowerCase().startsWith(q)) || a.name.localeCompare(b.name)).slice(0, 6)
+    .map(p => ({ label: p.name, id: p.id }));
+  if (canAll() && "everyone".startsWith(q)) items.unshift({ label: "everyone", all: true });
+  if (!items.length) { pop.hidden = true; return; }
+  mentionState = { items, idx: 0, start };
+  pop.innerHTML = items.map((it, i) => `<button type="button" class="${i === 0 ? "on" : ""}" data-act="pickmention" data-i="${i}">${it.all
+    ? `<span class="av nodot" style="background:var(--accent)">@</span><b>@everyone</b><small>Notify everyone here</small>` : `${av(it.label, "nodot")}<b>${esc(it.label)}</b>`}</button>`).join("");
+  pop.hidden = false;
+}
+function mentionKey(e) {
+  const pop = $("mentionPop"); if (!pop || pop.hidden) return;
+  const n = mentionState.items.length;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); mentionState.idx = (mentionState.idx + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+    [...pop.children].forEach((b, i) => b.classList.toggle("on", i === mentionState.idx));
+  } else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); applyMention(mentionState.idx); }
+  else if (e.key === "Escape") { e.preventDefault(); pop.hidden = true; }
+}
+function applyMention(i) {
+  const it = mentionState.items[i], inp = $("msgIn"); if (!it || !inp) return;
+  const caret = inp.selectionStart, pos = mentionState.start + it.label.length + 2;
+  inp.value = inp.value.slice(0, mentionState.start) + "@" + it.label + " " + inp.value.slice(caret);
+  inp.setSelectionRange(pos, pos); inp.focus(); $("mentionPop").hidden = true;
+}
+async function pingMentions(sid, cid, cname, text, mid) {   // one small "ping" record per message; every member's browser watches for them
+  const p = parseMentions(text); if (!p.ids.length && !p.all) return;
+  try { await addDoc(collection(db, "servers", sid, "pings"), { from: me.uid, fromName: me.username, cid, cname, mid: mid || "", text: text.slice(0, 100), atAll: p.all, to: p.ids, createdAt: serverTimestamp() }); }
+  catch (err) { console.error(err); }
+}
+const tms = t => (t?.toMillis ? t.toMillis() : t === null ? Date.now() : 0);
+const aimedAtMe = p => p.from !== me.uid && !!(p.atAll || (p.to || []).includes(me.uid));
+const mentionCount = sid => (pingList[sid] || []).filter(p => aimedAtMe(p) && tms(p.createdAt) > (seenAtMs[sid] || 0)).length;
+const totalMentions = () => myServers.reduce((n, x) => n + mentionCount(x.id), 0);
+function markServerSeen(sid) {                              // opening a server in a focused window clears its mention badge
+  if (document.visibilityState !== "visible" || !document.hasFocus() || !mentionCount(sid)) return;
+  seenAtMs[sid] = Date.now();
+  setDoc(doc(db, "users", me.uid, "servers", sid), { seenAt: serverTimestamp() }, { merge: true }).catch(() => {});
+}
+function openServerAt(sid, name, cid) {
+  if (srv?.id === sid) { selectChannel(cid); render(); } else openServer(sid, name, cid);
+}
+function notifyPing(x, p) {
+  const focused = document.visibilityState === "visible" && document.hasFocus();
+  if (srv?.id === x.id && srv.cid === p.cid && focused) return;   // you're looking right at it
+  if (myStatus === "dnd") return;
+  const title = p.atAll ? `${p.fromName} pinged @everyone in #${p.cname}` : `${p.fromName} mentioned you in #${p.cname}`;
+  if (!focused && "Notification" in window && Notification.permission === "granted") {
+    try { const n = new Notification(title, { body: `${x.name}: ${p.text}`, tag: "ping-" + p.id }); n.onclick = () => { window.focus(); n.close(); openServerAt(x.id, x.name, p.cid); }; }
+    catch (e) { console.error(e); }
+  }
+  ping();
+}
+function syncPingWatchers() {                              // one lightweight listener per server you're in
+  const ids = new Set(myServers.map(x => x.id));
+  Object.keys(pingU).forEach(id => { if (!ids.has(id)) { pingU[id](); delete pingU[id]; delete pingList[id]; delete pingReady[id]; } });
+  myServers.forEach(x => {
+    const saved = x.seenAt?.toMillis?.() || 0;
+    seenAtMs[x.id] = Math.max(seenAtMs[x.id] || 0, saved);
+    if (pingU[x.id]) return;
+    let since = saved;
+    if (!since) { since = Date.now(); seenAtMs[x.id] = since; setDoc(doc(db, "users", me.uid, "servers", x.id), { seenAt: serverTimestamp() }, { merge: true }).catch(() => {}); }
+    pingU[x.id] = onSnapshot(query(collection(db, "servers", x.id, "pings"), where("createdAt", ">", new Date(since)), orderBy("createdAt"), limit(50)), snap => {
+      pingList[x.id] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (pingReady[x.id]) snap.docChanges().forEach(ch => { if (ch.type === "added") { const p = { id: ch.doc.id, ...ch.doc.data() }; if (aimedAtMe(p)) notifyPing(x, p); } });
+      pingReady[x.id] = true;
+      if (srv?.id === x.id) markServerSeen(x.id);
+      render();
+    }, err => console.error(err));
+  });
 }
 
 /* ---------- invite links ---------- */
@@ -912,16 +1020,16 @@ function fillMsgs(list, who, emptyText, colorOf) {
   const el = $("msgs"), near = !el.children.length || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   list.forEach(m => { if (m.from) watch(m.from); });          // loads each author's picture
   el.innerHTML = list.length ? list.map(m => {
-    const n = who(m), c = colorOf?.(m), u = esc(m.from || ""), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
+    const n = who(m), c = colorOf?.(m), hot = isHot(m), u = esc(m.from || ""), t = m.createdAt?.toDate?.().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "";
     const rp = m.replyTo && typeof m.replyTo === "object"
       ? `<div class="mreply" data-act="jumpmsg" data-id="${esc(m.replyTo.id || "")}">${I.reply}<b>${esc(m.replyTo.name || "Someone")}</b><span class="rt">${esc(m.replyTo.text || "")}</span></div>` : "";
-    return `<div class="m" data-mid="${esc(m.id || "")}"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div class="mbody">${rp}<b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small>${m.text ? `<p>${esc(m.text)}</p>` : ""}${okImg(m.image) ? `<a class="mimg" href="${esc(m.image)}" target="_blank" rel="noopener noreferrer"><img class="mimgi" src="${esc(limitw(m.image, 800))}" alt="Image from ${esc(n)}" loading="lazy"></a>` : ""}${rxChips(m)}</div>${m.id ? mTools(m) : ""}</div>`;
+    return `<div class="m${hot ? " mention" : ""}" data-mid="${esc(m.id || "")}"><span class="plink" data-act="profile" data-uid="${u}">${av(n, "nodot")}</span><div class="mbody">${rp}<b class="plink" data-act="profile" data-uid="${u}" ${c ? `style="color:${c}"` : ""}>${esc(n)}</b><small>${t}</small>${m.text ? `<p>${mentionHtml(m)}</p>` : ""}${okImg(m.image) ? `<a class="mimg" href="${esc(m.image)}" target="_blank" rel="noopener noreferrer"><img class="mimgi" src="${esc(limitw(m.image, 800))}" alt="Image from ${esc(n)}" loading="lazy"></a>` : ""}${rxChips(m)}</div>${m.id ? mTools(m) : ""}</div>`;
   }).join("") : `<div class="empty">${esc(emptyText)}</div>`;
   if (near) el.scrollTop = el.scrollHeight;
   el.querySelectorAll("img.mimgi").forEach(im => { if (!im.complete) im.addEventListener("load", () => { if (near) el.scrollTop = el.scrollHeight; }); });
 }
 
-const msgPane = ph => `<div id="msgs" aria-live="polite"></div><div class="replybar" id="replyBar" hidden></div><div class="attachbar" id="attachBar" hidden></div><form class="send" id="sendForm"><button type="button" class="ib attach" data-act="attach" aria-label="Attach an image" title="Attach an image">${I.image}</button><input type="file" id="fMsg" accept="image/png,image/jpeg,image/gif,image/webp" hidden><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form><div class="sendnote" id="sendNote" role="status" hidden></div>`;
+const msgPane = ph => `<div id="msgs" aria-live="polite"></div><div class="replybar" id="replyBar" hidden></div><div class="attachbar" id="attachBar" hidden></div><form class="send" id="sendForm"><div class="mpop" id="mentionPop" hidden></div><button type="button" class="ib attach" data-act="attach" aria-label="Attach an image" title="Attach an image">${I.image}</button><input type="file" id="fMsg" accept="image/png,image/jpeg,image/gif,image/webp" hidden><input id="msgIn" placeholder="${esc(ph)}" autocomplete="off" maxlength="2000" aria-label="Message"><button class="primary" type="submit">Send</button></form><div class="sendnote" id="sendNote" role="status" hidden></div>`;
 const bindSend = (col, extra = () => ({}), guard, after) => () => {
   const note = (t, ms = 6000) => {
     const n = $("sendNote"); if (!n) return;
@@ -941,9 +1049,14 @@ const bindSend = (col, extra = () => ({}), guard, after) => () => {
     }
     const rd = replyDraft, ad = attachDraft;
     i.value = ""; replyDraft = null; attachDraft = null; renderReplyBar(); renderAttachBar();
-    try { await addDoc(col(), { from: me.uid, text, ...extra(), ...(rd ? { replyTo: rd } : {}), ...(ad?.url ? { image: ad.url } : {}), createdAt: serverTimestamp() }); await after?.(text, ad?.url); }
+    try { await addDoc(col(), { from: me.uid, text, ...extra(text), ...(rd ? { replyTo: rd } : {}), ...(ad?.url ? { image: ad.url } : {}), createdAt: serverTimestamp() }).then(ref => after?.(text, ad?.url, ref.id)); }
     catch (err) { i.value = text; replyDraft = rd; attachDraft = ad; renderReplyBar(); renderAttachBar(); console.error(err); }
   };
+  const inp = $("msgIn");
+  inp.addEventListener("input", updateMentionPop);
+  inp.addEventListener("keydown", mentionKey);
+  inp.addEventListener("blur", () => { $("mentionPop").hidden = true; });
+  $("mentionPop").addEventListener("mousedown", e => e.preventDefault());       // keep typing focus while clicking a name
   $("fMsg").onchange = e => { const f = e.target.files?.[0]; e.target.value = ""; if (f) attachFile(f, note); };
   $("msgIn").addEventListener("paste", e => {
     const f = [...(e.clipboardData?.files || [])].find(x => x.type.startsWith("image/"));
@@ -954,7 +1067,7 @@ const bindSend = (col, extra = () => ({}), guard, after) => () => {
 };
 
 function renderRail() {
-  $("servers").innerHTML = myServers.map(x => `<button class="srv ${srv && srv.id === x.id ? "on" : ""}" data-act="server" data-id="${x.id}" data-name="${esc(x.name)}" style="background:${color(x.name)};color:#0b1417" aria-label="${esc(x.name)}" title="${esc(x.name)}">${esc(x.name[0].toUpperCase())}</button>`).join("");
+  $("servers").innerHTML = myServers.map(x => `<button class="srv ${srv && srv.id === x.id ? "on" : ""}" data-act="server" data-id="${x.id}" data-name="${esc(x.name)}" style="background:${color(x.name)};color:#0b1417" aria-label="${esc(x.name)}" title="${esc(x.name)}">${esc(x.name[0].toUpperCase())}${mentionCount(x.id) ? `<span class="badge">${mentionCount(x.id)}</span>` : ""}</button>`).join("");
   document.querySelector(".srv.home").classList.toggle("on", !srv);
 }
 
@@ -983,7 +1096,8 @@ function renderServer() {
   $("top").innerHTML = `<h1>${ch ? "# " + esc(ch.name) : esc(srv.name)}</h1>`;
   if (!ch) { shell("srv:none", `<div class="empty">No text channels yet.</div>`, () => {}); return; }
   shell("srv:" + srv.id + ":" + ch.id, msgPane("Message #" + ch.name),
-    bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), () => ({ name: me.username }), modGuard));
+    bindSend(() => collection(db, "servers", srv.id, "channels", ch.id, "messages"), text => ({ name: me.username, ...mentionFields(text) }), modGuard,
+      (text, img, mid) => pingMentions(srv.id, ch.id, ch.name, text, mid)));
   const inp = $("msgIn"), ok = can("sendMessages") && canSend(ch);
   if (inp) { inp.disabled = !ok; inp.placeholder = ok ? "Message #" + ch.name : canSend(ch) ? "You don't have permission to send messages." : "This channel is locked. Only staff can send messages here."; }
   fillMsgs(srv.msgs, m => m.name || "Unknown", `Welcome to #${ch.name}. Say something.`, m => roleColor(srv.members.find(x => x.id === m.from)), m => m.from === me.uid || can("manageMessages"));
@@ -1188,6 +1302,7 @@ const canSend = c => {
 };
 function ensureChannel(s) {
   if (srv !== s) return;
+  if (s.want) { const t = s.channels.find(x => x.id === s.want && x.type !== "voice" && canSee(x)); if (t) { s.want = null; if (s.cid !== t.id) selectChannel(t.id); return; } }
   const ok = sorted(s.channels.filter(x => x.type !== "voice" && canSee(x)));
   if (!ok.some(x => x.id === s.cid)) selectChannel(ok[0]?.id);
 }
@@ -1383,6 +1498,7 @@ document.addEventListener("click", e => {
   else if (act === "clearavatar") { profDraft.avatarUrl = ""; paintProfPreview(); }
   else if (act === "clearbannerimg") { profDraft.bannerUrl = ""; paintProfPreview(); }
   else if (act === "closeprof") $("profModal").hidden = true;
+  else if (act === "pickmention") applyMention(+t.dataset.i);
   else if (act === "dmuser") { $("profModal").hidden = true; startDm(t.dataset.uid).catch(err => { console.error(err); alert("Couldn't start that chat."); }); }
   else if (act === "newgroup") openGroupCreate();
   else if (act === "mkgroup") mkGroup();
